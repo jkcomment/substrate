@@ -52,37 +52,6 @@
 //! any signaled changes based on whether the signaling block is included in the
 //! newly-finalized chain.
 
-extern crate finality_grandpa as grandpa;
-extern crate futures;
-extern crate substrate_client as client;
-extern crate sr_primitives as runtime_primitives;
-extern crate substrate_consensus_common as consensus_common;
-extern crate substrate_network as network;
-extern crate substrate_primitives;
-extern crate tokio;
-extern crate parking_lot;
-extern crate parity_codec as codec;
-extern crate substrate_finality_grandpa_primitives as fg_primitives;
-extern crate rand;
-
-#[macro_use]
-extern crate log;
-
-#[cfg(feature="service-integration")]
-extern crate substrate_service as service;
-
-#[cfg(test)]
-extern crate substrate_keyring as keyring;
-
-#[cfg(test)]
-extern crate substrate_test_client as test_client;
-
-#[cfg(test)]
-extern crate env_logger;
-
-#[macro_use]
-extern crate parity_codec_derive;
-
 use futures::prelude::*;
 use futures::sync::mpsc;
 use client::{
@@ -90,7 +59,8 @@ use client::{
 	error::Error as ClientError, error::ErrorKind as ClientErrorKind,
 };
 use client::blockchain::HeaderBackend;
-use codec::{Encode, Decode};
+use parity_codec::{Encode, Decode};
+use parity_codec_derive::{Encode, Decode};
 use consensus_common::{BlockImport, JustificationImport, Error as ConsensusError, ErrorKind as ConsensusErrorKind, ImportBlock, ImportResult};
 use runtime_primitives::Justification;
 use runtime_primitives::traits::{
@@ -101,6 +71,7 @@ use fg_primitives::GrandpaApi;
 use runtime_primitives::generic::BlockId;
 use substrate_primitives::{ed25519, H256, Ed25519AuthorityId, Blake2Hasher};
 use tokio::timer::Delay;
+use log::{debug, warn, info, trace};
 
 use grandpa::Error as GrandpaError;
 use grandpa::{voter, round::State as RoundState, Equivocation, BlockNumberOps};
@@ -570,7 +541,7 @@ impl<B, E, Block: BlockT<Hash=H256>, N, RA> voter::Environment<Block::Hash, Numb
 		let precommit_timer = Delay::new(now + self.config.gossip_duration * 4);
 
 		// TODO: dispatch this with `mpsc::spawn`.
-		let incoming = ::communication::checked_message_stream::<Block, _>(
+		let incoming = communication::checked_message_stream::<Block, _>(
 			round,
 			self.set_id,
 			self.network.messages_for(round, self.set_id),
@@ -580,7 +551,7 @@ impl<B, E, Block: BlockT<Hash=H256>, N, RA> voter::Environment<Block::Hash, Numb
 		let local_key = self.config.local_key.as_ref()
 			.filter(|pair| self.voters.contains_key(&pair.public().into()));
 
-		let (out_rx, outgoing) = ::communication::outgoing_messages::<Block, _>(
+		let (out_rx, outgoing) = communication::outgoing_messages::<Block, _>(
 			round,
 			self.set_id,
 			local_key.cloned(),
@@ -1423,7 +1394,7 @@ pub fn block_import<B, E, Block: BlockT<Hash=H256>, RA, PRA>(
 
 			authority_set
 		}
-		Some(raw) => ::authorities::AuthoritySet::decode(&mut &raw[..])
+		Some(raw) => authorities::AuthoritySet::decode(&mut &raw[..])
 			.ok_or_else(|| ::client::error::ErrorKind::Backend(
 				format!("GRANDPA authority set kept in invalid format")
 			))?
@@ -1482,7 +1453,7 @@ fn committer_communication<Block: BlockT<Hash=H256>, B, E, N, RA>(
 	DigestItemFor<Block>: DigestItem<AuthorityId=Ed25519AuthorityId>,
 {
 	// verification stream
-	let commit_in = ::communication::checked_commit_stream::<Block, _>(
+	let commit_in = communication::checked_commit_stream::<Block, _>(
 		set_id,
 		network.commit_messages(set_id),
 		voters.clone(),
@@ -1499,7 +1470,7 @@ fn committer_communication<Block: BlockT<Hash=H256>, B, E, N, RA>(
 		.map(|pair| voters.contains_key(&pair.public().into()))
 		.unwrap_or(false);
 
-	let commit_out = ::communication::CommitsOut::<Block, _>::new(
+	let commit_out = communication::CommitsOut::<Block, _>::new(
 		network.clone(),
 		set_id,
 		is_voter,

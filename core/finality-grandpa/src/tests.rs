@@ -29,12 +29,13 @@ use client::{
 	runtime_api::{Core, RuntimeVersion, ApiExt},
 };
 use test_client::{self, runtime::BlockNumber};
-use codec::Decode;
+use parity_codec::Decode;
 use consensus_common::BlockOrigin;
 use consensus_common::import_queue::{SharedBlockImport, SharedJustificationImport};
 use std::{collections::HashSet, result};
 use runtime_primitives::traits::{ApiRef, ProvideRuntimeApi, RuntimeApiInfo};
 use runtime_primitives::generic::BlockId;
+use crate::AUTHORITY_SET_KEY;
 
 use authorities::AuthoritySet;
 
@@ -514,7 +515,7 @@ fn transition_3_voters_twice_1_observer() {
 		assert_eq!(peer.client().info().unwrap().chain.best_number, 1,
 				   "Peer #{} failed to sync", i);
 
-		let set_raw = peer.client().backend().get_aux(::AUTHORITY_SET_KEY).unwrap().unwrap();
+		let set_raw = peer.client().backend().get_aux(AUTHORITY_SET_KEY).unwrap().unwrap();
 		let set = AuthoritySet::<Hash, BlockNumber>::decode(&mut &set_raw[..]).unwrap();
 
 		assert_eq!(set.current(), (0, make_ids(peers_a).as_slice()));
@@ -600,7 +601,7 @@ fn transition_3_voters_twice_1_observer() {
 				.take_while(|n| Ok(n.header.number() < &30))
 				.for_each(move |_| Ok(()))
 				.map(move |()| {
-					let set_raw = client.backend().get_aux(::AUTHORITY_SET_KEY).unwrap().unwrap();
+					let set_raw = client.backend().get_aux(AUTHORITY_SET_KEY).unwrap().unwrap();
 					let set = AuthoritySet::<Hash, BlockNumber>::decode(&mut &set_raw[..]).unwrap();
 
 					assert_eq!(set.current(), (2, make_ids(peers_c).as_slice()));
