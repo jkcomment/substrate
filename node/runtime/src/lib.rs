@@ -20,54 +20,26 @@
 // `construct_runtime!` does a lot of recursion and requires us to increase the limit to 256.
 #![recursion_limit="256"]
 
-#[macro_use]
-extern crate srml_support;
-
-#[macro_use]
-extern crate sr_primitives as runtime_primitives;
-
-extern crate substrate_primitives;
-
-#[macro_use]
-extern crate substrate_client as client;
-
-#[macro_use]
-extern crate parity_codec_derive;
-
-extern crate parity_codec as codec;
-
-extern crate sr_std as rstd;
-extern crate srml_aura as aura;
-extern crate srml_balances as balances;
-extern crate srml_consensus as consensus;
-extern crate srml_contract as contract;
-extern crate srml_council as council;
-extern crate srml_democracy as democracy;
-extern crate srml_executive as executive;
-extern crate srml_grandpa as grandpa;
-extern crate srml_indices as indices;
-extern crate srml_session as session;
-extern crate srml_staking as staking;
-extern crate srml_sudo as sudo;
-extern crate srml_system as system;
-extern crate srml_timestamp as timestamp;
-extern crate srml_treasury as treasury;
-#[macro_use]
-extern crate sr_version as version;
-extern crate node_primitives;
-extern crate substrate_consensus_aura_primitives as consensus_aura;
-
 use rstd::prelude::*;
+use parity_codec_derive::{Encode, Decode};
+use srml_support::{construct_runtime, mashup, mashup_parser, mashup_macro, mashup_macro_impl,
+	__decl_outer_event, impl_outer_event, __impl_outer_event_json_metadata, __decl_outer_origin,
+	impl_outer_origin, __decl_all_modules, __decl_outer_dispatch, impl_outer_dispatch, Serialize,
+	__impl_outer_dispatch_common, __impl_decode, __impl_encode, __impl_outer_dispatch_metadata,
+	__decl_runtime_metadata, impl_runtime_metadata, __runtime_modules_to_metadata, __decl_outer_log,
+	__decl_outer_config, Deserialize, __decl_outer_inherent, impl_outer_inherent};
 use substrate_primitives::u32_trait::{_2, _4};
 use node_primitives::{
 	AccountId, AccountIndex, Balance, BlockNumber, Hash, Index, SessionKey, Signature
 };
 use grandpa::fg_primitives::{self, ScheduledChange};
-use client::{
+use substrate_client::impl_runtime_apis;
+use substrate_client::{
 	block_builder::api::{self as block_builder_api, InherentData, CheckInherentsResult},
 	runtime_api as client_api,
 };
-use runtime_primitives::ApplyResult;
+use runtime_primitives::{ApplyResult, create_runtime_str, impl_outer_log, impl_outer_config,
+	__impl_outer_config_types};
 use runtime_primitives::transaction_validity::TransactionValidity;
 use runtime_primitives::generic;
 use runtime_primitives::traits::{
