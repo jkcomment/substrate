@@ -14,18 +14,18 @@
 // You should have received a copy of the GNU General Public License
 // along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::borrow::BorrowMut;
-use std::cell::{RefMut, RefCell};
-use error::{Error, ErrorKind, Result};
+use std::{borrow::BorrowMut, result, cell::{RefMut, RefCell}};
+use crate::error::{Error, ErrorKind, Result};
 use state_machine::{CodeExecutor, Externalities};
-use wasm_executor::WasmExecutor;
+use crate::wasm_executor::WasmExecutor;
 use wasmi::{Module as WasmModule, ModuleRef as WasmModuleInstanceRef};
 use runtime_version::{NativeVersion, RuntimeVersion};
 use std::{collections::HashMap, panic::UnwindSafe};
-use codec::{Decode, Encode};
-use RuntimeInfo;
+use parity_codec::{Decode, Encode};
+use crate::RuntimeInfo;
 use primitives::{Blake2Hasher, NativeOrEncoded};
 use primitives::storage::well_known_keys;
+use log::trace;
 
 /// Default num of pages for the heap
 const DEFAULT_HEAP_PAGES: u64 = 1024;
@@ -108,7 +108,7 @@ fn safe_call<F, U>(f: F) -> Result<U>
 ///
 /// If the inner closure panics, it will be caught and return an error.
 pub fn with_native_environment<F, U>(ext: &mut Externalities<Blake2Hasher>, f: F) -> Result<U>
-where F: UnwindSafe + FnOnce() -> U
+	where F: UnwindSafe + FnOnce() -> U
 {
 	::runtime_io::with_externalities(ext, move || safe_call(f))
 }
@@ -185,7 +185,7 @@ impl<D: NativeExecutionDispatch> CodeExecutor<Blake2Hasher> for NativeExecutor<D
 	<
 		E: Externalities<Blake2Hasher>,
 		R:Decode + Encode + PartialEq,
-		NC: FnOnce() -> R + UnwindSafe
+		NC: FnOnce() -> result::Result<R, &'static str> + UnwindSafe
 	>(
 		&self,
 		ext: &mut E,
@@ -241,7 +241,8 @@ impl<D: NativeExecutionDispatch> CodeExecutor<Blake2Hasher> for NativeExecutor<D
 							.map_or_else(||"<None>".into(), |v| format!("{}", v))
 					);
 					(
-						with_native_environment(ext, move || (call)()).map(NativeOrEncoded::Native),
+						with_native_environment(ext, move || (call)())
+							.and_then(|r| r.map(NativeOrEncoded::Native).map_err(Into::into)),
 						true
 					)
 				}
@@ -267,7 +268,6 @@ macro_rules! native_executor_instance {
 		native_executor_instance!(IMPL $name, $dispatcher, $version, $code);
 	};
 	(IMPL $name:ident, $dispatcher:path, $version:path, $code:expr) => {
-		// TODO: this is not so great – I think I should go back to have dispatch take a type param and modify this macro to accept a type param and then pass it in from the test-client instead
 		use primitives::Blake2Hasher as _Blake2Hasher;
 		impl $crate::NativeExecutionDispatch for $name {
 			fn native_equivalent() -> &'static [u8] {
