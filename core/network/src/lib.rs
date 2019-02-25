@@ -20,41 +20,14 @@
 //! Substrate-specific P2P networking: synchronizing blocks, propagating BFT messages.
 //! Allows attachment of an optional subprotocol for chain-specific requests.
 
-extern crate linked_hash_map;
-extern crate lru_cache;
-extern crate parking_lot;
-extern crate substrate_primitives as primitives;
-extern crate substrate_client as client;
-extern crate sr_primitives as runtime_primitives;
-extern crate substrate_network_libp2p as network_libp2p;
-extern crate substrate_consensus_common as consensus;
-extern crate parity_codec as codec;
-extern crate futures;
-extern crate rustc_hex;
-extern crate rand;
-extern crate tokio;
-#[macro_use] extern crate log;
-#[macro_use] extern crate bitflags;
-#[macro_use] extern crate error_chain;
-#[macro_use] extern crate parity_codec_derive;
-
-#[cfg(test)]
-extern crate env_logger;
-
-#[cfg(any(test, feature = "test-helpers"))]
-extern crate substrate_keyring as keyring;
-
-#[cfg(any(test, feature = "test-helpers"))]
-extern crate substrate_test_client as test_client;
-
 mod service;
 mod sync;
 #[macro_use]
 mod protocol;
-mod io;
 mod chain;
 mod blocks;
 mod on_demand;
+mod util;
 pub mod config;
 pub mod consensus_gossip;
 pub mod error;
@@ -65,14 +38,14 @@ pub mod specialization;
 pub mod test;
 
 pub use chain::Client as ClientHandle;
-pub use service::{Service, FetchFuture, TransactionPool, ManageNetwork, SyncProvider, ExHashT};
+pub use service::{Service, FetchFuture, TransactionPool, ManageNetwork, NetworkMsg, SyncProvider, ExHashT};
 pub use protocol::{ProtocolStatus, PeerInfo, Context};
 pub use sync::{Status as SyncStatus, SyncState};
 pub use network_libp2p::{
     NodeIndex, ProtocolId, Severity, Protocol, Multiaddr,
-    obtain_private_key, multiaddr, PeerId, PublicKey
+    obtain_private_key, build_multiaddr, PeerId, PublicKey
 };
-pub use message::{generic as generic_message, RequestId, Status as StatusMessage};
+pub use message::{generic as generic_message, RequestId, Status as StatusMessage, ConsensusEngineId};
 pub use error::Error;
 pub use on_demand::{OnDemand, OnDemandService, RemoteResponse};
 #[doc(hidden)]

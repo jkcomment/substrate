@@ -21,17 +21,16 @@ mod custom_proto;
 mod error;
 mod secret;
 mod service_task;
-mod topology;
 mod traits;
 mod transport;
 
-pub use crate::custom_proto::RegisteredProtocol;
+pub use crate::custom_proto::{CustomMessage, RegisteredProtocol};
 pub use crate::error::{Error, ErrorKind, DisconnectReason};
 pub use crate::secret::obtain_private_key;
 pub use crate::service_task::{start_service, Service, ServiceEvent};
 pub use crate::traits::{NetworkConfiguration, NodeIndex, NodeId, NonReservedPeerMode};
 pub use crate::traits::{ProtocolId, Secret, Severity};
-pub use libp2p::{Multiaddr, multiaddr::{Protocol}, multiaddr, PeerId, core::PublicKey};
+pub use libp2p::{Multiaddr, multiaddr::Protocol, build_multiaddr, PeerId, core::PublicKey};
 
 /// Check if node url is valid
 pub fn validate_node_url(url: &str) -> Result<(), Error> {

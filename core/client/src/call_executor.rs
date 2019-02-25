@@ -15,11 +15,11 @@
 // along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::{sync::Arc, cmp::Ord, panic::UnwindSafe, result};
-use codec::{Encode, Decode};
+use parity_codec::{Encode, Decode};
 use runtime_primitives::generic::BlockId;
 use runtime_primitives::traits::Block as BlockT;
 use state_machine::{
-	self, OverlayedChanges, Ext, CodeExecutor, ExecutionManager, native_when_possible
+	self, OverlayedChanges, Ext, CodeExecutor, ExecutionManager, ExecutionStrategy
 };
 use executor::{RuntimeVersion, RuntimeInfo, NativeVersion};
 use hash_db::Hasher;
@@ -47,6 +47,7 @@ where
 		id: &BlockId<B>,
 		method: &str,
 		call_data: &[u8],
+		strategy: ExecutionStrategy,
 	) -> Result<Vec<u8>, error::Error>;
 
 	/// Execute a contextual call on top of state in a block of a given hash.
@@ -70,7 +71,7 @@ where
 		changes: &mut OverlayedChanges,
 		initialised_block: &mut Option<BlockId<B>>,
 		prepare_environment_block: PB,
-		manager: ExecutionManager<EM>,
+		execution_manager: ExecutionManager<EM>,
 		native_call: Option<NC>,
 	) -> error::Result<NativeOrEncoded<R>> where ExecutionManager<EM>: Clone;
 
@@ -164,19 +165,19 @@ where
 		id: &BlockId<Block>,
 		method: &str,
 		call_data: &[u8],
+		strategy: ExecutionStrategy
 	) -> error::Result<Vec<u8>> {
 		let mut changes = OverlayedChanges::default();
 		let state = self.backend.state_at(*id)?;
-		let return_data = state_machine::execute_using_consensus_failure_handler::<
-			_, _, _, _, _, NeverNativeValue, fn() -> _
-		>(
+		let return_data = state_machine::new(
 			&state,
 			self.backend.changes_trie_storage(),
 			&mut changes,
 			&self.executor,
 			method,
 			call_data,
-			native_when_possible(),
+		).execute_using_consensus_failure_handler::<_, NeverNativeValue, fn() -> _>(
+			strategy.get_manager(),
 			false,
 			None,
 		)
@@ -201,39 +202,44 @@ where
 		changes: &mut OverlayedChanges,
 		initialised_block: &mut Option<BlockId<Block>>,
 		prepare_environment_block: PB,
-		manager: ExecutionManager<EM>,
+		execution_manager: ExecutionManager<EM>,
 		native_call: Option<NC>,
 	) -> Result<NativeOrEncoded<R>, error::Error> where ExecutionManager<EM>: Clone {
 		let state = self.backend.state_at(*at)?;
 		if method != "Core_initialise_block" && initialised_block.map(|id| id != *at).unwrap_or(true) {
 			let header = prepare_environment_block()?;
-			state_machine::execute_using_consensus_failure_handler::<
-				_, _, _, _, _, R, fn() -> _,
-			>(
+			state_machine::new(
 				&state,
 				self.backend.changes_trie_storage(),
 				changes,
 				&self.executor,
 				"Core_initialise_block",
 				&header.encode(),
-				manager.clone(),
+			).execute_using_consensus_failure_handler::<_, R, fn() -> _>(
+				execution_manager.clone(),
 				false,
 				None,
 			)?;
 			*initialised_block = Some(*at);
 		}
 
-		let result = state_machine::execute_using_consensus_failure_handler(
+		let result = state_machine::new(
 			&state,
 			self.backend.changes_trie_storage(),
 			changes,
 			&self.executor,
 			method,
 			call_data,
-			manager,
+		).execute_using_consensus_failure_handler(
+			execution_manager,
 			false,
 			native_call,
 		).map(|(result, _, _)| result)?;
+
+		// If the method is `initialise_block` we need to set the `initialised_block`
+		if method == "Core_initialise_block" {
+			*initialised_block = Some(*at);
+		}
 
 		self.backend.destroy_state(state)?;
 		Ok(result)
@@ -263,13 +269,14 @@ where
 		manager: ExecutionManager<F>,
 		native_call: Option<NC>,
 	) -> error::Result<(NativeOrEncoded<R>, S::Transaction, Option<MemoryDB<Blake2Hasher>>)> {
-		state_machine::execute_using_consensus_failure_handler(
+		state_machine::new(
 			state,
 			self.backend.changes_trie_storage(),
 			changes,
 			&self.executor,
 			method,
 			call_data,
+		).execute_using_consensus_failure_handler(
 			manager,
 			true,
 			native_call,
