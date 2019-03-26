@@ -1,4 +1,4 @@
-// Copyright 2017-2018 Parity Technologies (UK) Ltd.
+// Copyright 2017-2019 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
 // Substrate is free software: you can redistribute it and/or modify
@@ -18,19 +18,19 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(feature = "std")] pub mod genesismap;
+#[cfg(feature = "std")]
+pub mod genesismap;
 pub mod system;
 
 use rstd::{prelude::*, marker::PhantomData};
 use parity_codec::{Encode, Decode, Input};
-use parity_codec_derive::{Encode, Decode};
 
 use substrate_client::{
 	runtime_api as client_api, block_builder::api as block_builder_api, decl_runtime_apis,
 	impl_runtime_apis,
 };
 use runtime_primitives::{
-	ApplyResult, Ed25519Signature, transaction_validity::TransactionValidity,
+	ApplyResult, transaction_validity::TransactionValidity,
 	create_runtime_str,
 	traits::{
 		BlindCheckable, BlakeTwo256, Block as BlockT, Extrinsic as ExtrinsicT,
@@ -39,7 +39,7 @@ use runtime_primitives::{
 };
 use runtime_version::RuntimeVersion;
 pub use primitives::hash::H256;
-use primitives::{Ed25519AuthorityId, OpaqueMetadata};
+use primitives::{ed25519, sr25519, OpaqueMetadata};
 #[cfg(any(feature = "std", test))]
 use runtime_version::NativeVersion;
 use inherents::{CheckInherentsResult, InherentData};
@@ -78,12 +78,23 @@ pub struct Transfer {
 	pub nonce: u64,
 }
 
+impl Transfer {
+	/// Convert into a signed extrinsic.
+	#[cfg(feature = "std")]
+	pub fn into_signed_tx(self) -> Extrinsic {
+		let signature = keyring::AccountKeyring::from_public(&self.from)
+			.expect("Creates keyring from public key.").sign(&self.encode()).into();
+		Extrinsic::Transfer(self, signature)
+	}
+}
+
 /// Extrinsic for test-runtime.
 #[derive(Clone, PartialEq, Eq, Encode, Decode)]
 #[cfg_attr(feature = "std", derive(Debug))]
 pub enum Extrinsic {
-	AuthoritiesChange(Vec<Ed25519AuthorityId>),
-	Transfer(Transfer, Ed25519Signature),
+	AuthoritiesChange(Vec<AuthorityId>),
+	Transfer(Transfer, AccountSignature),
+	IncludeData(Vec<u8>),
 }
 
 #[cfg(feature = "std")]
@@ -107,6 +118,7 @@ impl BlindCheckable for Extrinsic {
 					Err(runtime_primitives::BAD_SIGNATURE)
 				}
 			},
+			Extrinsic::IncludeData(data) => Ok(Extrinsic::IncludeData(data)),
 		}
 	}
 }
@@ -126,8 +138,14 @@ impl Extrinsic {
 	}
 }
 
+// The identity type used by authorities.
+pub type AuthorityId = ed25519::Public;
+// The signature type used by authorities.
+pub type AuthoritySignature = ed25519::Signature;
 /// An identifier for an account on this system.
-pub type AccountId = H256;
+pub type AccountId = sr25519::Public;
+// The signature type used by accounts/transactions.
+pub type AccountSignature = sr25519::Signature;
 /// A simple hash type for all our hashing.
 pub type Hash = H256;
 /// The block number type used in this runtime.
@@ -135,7 +153,7 @@ pub type BlockNumber = u64;
 /// Index of a transaction.
 pub type Index = u64;
 /// The item of a block digest.
-pub type DigestItem = runtime_primitives::generic::DigestItem<H256, Ed25519AuthorityId>;
+pub type DigestItem = runtime_primitives::generic::DigestItem<H256, AuthorityId, AuthoritySignature>;
 /// The digest of a block.
 pub type Digest = runtime_primitives::generic::Digest<DigestItem>;
 /// A test block.
@@ -198,7 +216,7 @@ cfg_if! {
 			pub trait TestAPI {
 				/// Return the balance of the given account id.
 				fn balance_of(id: AccountId) -> u64;
-				/// A benchmkark function that adds one to the given value and returns the result.
+				/// A benchmark function that adds one to the given value and returns the result.
 				fn benchmark_add_one(val: &u64) -> u64;
 				/// A benchmark function that adds one to each value in the given vector and returns the
 				/// result.
@@ -214,6 +232,8 @@ cfg_if! {
 				fn function_signature_changed() -> u64;
 				fn fail_on_native() -> u64;
 				fn fail_on_wasm() -> u64;
+				fn benchmark_indirect_call() -> u64;
+				fn benchmark_direct_call() -> u64;
 			}
 		}
 	} else {
@@ -221,7 +241,7 @@ cfg_if! {
 			pub trait TestAPI {
 				/// Return the balance of the given account id.
 				fn balance_of(id: AccountId) -> u64;
-				/// A benchmkark function that adds one to the given value and returns the result.
+				/// A benchmark function that adds one to the given value and returns the result.
 				fn benchmark_add_one(val: &u64) -> u64;
 				/// A benchmark function that adds one to each value in the given vector and returns the
 				/// result.
@@ -234,6 +254,8 @@ cfg_if! {
 				fn function_signature_changed() -> Vec<u64>;
 				fn fail_on_native() -> u64;
 				fn fail_on_wasm() -> u64;
+				fn benchmark_indirect_call() -> u64;
+				fn benchmark_direct_call() -> u64;
 			}
 		}
 	}
@@ -249,6 +271,16 @@ impl GetRuntimeBlockType for Runtime {
 	type RuntimeBlock = Block;
 }
 
+/// Adds one to the given input and returns the final result.
+#[inline(never)]
+fn benchmark_add_one(i: u64) -> u64 {
+	i + 1
+}
+
+/// The `benchmark_add_one` function as function pointer.
+#[cfg(not(feature = "std"))]
+static BENCHMARK_ADD_ONE: runtime_io::ExchangeableFunction<fn(u64) -> u64> = runtime_io::ExchangeableFunction::new(benchmark_add_one);
+
 cfg_if! {
 	if #[cfg(feature = "std")] {
 		impl_runtime_apis! {
@@ -257,7 +289,7 @@ cfg_if! {
 					version()
 				}
 
-				fn authorities() -> Vec<Ed25519AuthorityId> {
+				fn authorities() -> Vec<AuthorityId> {
 					system::authorities()
 				}
 
@@ -335,10 +367,24 @@ cfg_if! {
 				fn fail_on_wasm() -> u64 {
 					1
 				}
+				fn benchmark_indirect_call() -> u64 {
+					let function = benchmark_add_one;
+					(0..1000).fold(0, |p, i| p + function(i))
+				}
+				fn benchmark_direct_call() -> u64 {
+					(0..1000).fold(0, |p, i| p + benchmark_add_one(i))
+				}
 			}
 
 			impl consensus_aura::AuraApi<Block> for Runtime {
 				fn slot_duration() -> u64 { 1 }
+			}
+
+			impl offchain_primitives::OffchainWorkerApi<Block> for Runtime {
+				fn offchain_worker(block: u64) {
+					let ex = Extrinsic::IncludeData(block.encode());
+					runtime_io::submit_extrinsic(&ex)
+				}
 			}
 		}
 	} else {
@@ -348,7 +394,7 @@ cfg_if! {
 					version()
 				}
 
-				fn authorities() -> Vec<Ed25519AuthorityId> {
+				fn authorities() -> Vec<AuthorityId> {
 					system::authorities()
 				}
 
@@ -430,10 +476,25 @@ cfg_if! {
 				fn fail_on_wasm() -> u64 {
 					panic!("Failing because we are on wasm")
 				}
+
+				fn benchmark_indirect_call() -> u64 {
+					(0..10000).fold(0, |p, i| p + BENCHMARK_ADD_ONE.get()(i))
+				}
+
+				fn benchmark_direct_call() -> u64 {
+					(0..10000).fold(0, |p, i| p + benchmark_add_one(i))
+				}
 			}
 
 			impl consensus_aura::AuraApi<Block> for Runtime {
 				fn slot_duration() -> u64 { 1 }
+			}
+
+			impl offchain_primitives::OffchainWorkerApi<Block> for Runtime {
+				fn offchain_worker(block: u64) {
+					let ex = Extrinsic::IncludeData(block.encode());
+					runtime_io::submit_extrinsic(&ex)
+				}
 			}
 		}
 	}

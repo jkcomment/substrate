@@ -1,4 +1,4 @@
-// Copyright 2017-2018 Parity Technologies (UK) Ltd.
+// Copyright 2017-2019 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
 // Substrate is free software: you can redistribute it and/or modify
@@ -58,6 +58,18 @@ use proc_macro::TokenStream;
 /// ```
 /// or when at least one storage field requires default initialization (both `get` and `config` or `build`).
 /// This struct can be expose as `Config` by `decl_runtime` macro.
+///
+/// ### Module with instances
+///
+/// `decl_storage!` macro support building modules with instances with the following syntax: (DefaultInstance type
+/// is optionnal)
+/// ```nocompile
+/// trait Store for Module<T: Trait<I>, I: Instance=DefaultInstance> as Example {}
+/// ```
+///
+/// Then the genesis config is generated with two generic parameter `GenesisConfig<T, I>`
+/// and storages are now accessible using two generic parameters like:
+/// `<Dummy<T, I>>::get()` or `Dummy::<T, I>::get()`
 #[proc_macro]
 pub fn decl_storage(input: TokenStream) -> TokenStream {
 	storage::transformation::decl_storage_impl(input)

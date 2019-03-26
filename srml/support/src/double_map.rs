@@ -1,4 +1,4 @@
-// Copyright 2017-2018 Parity Technologies (UK) Ltd.
+// Copyright 2017-2019 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
 // Substrate is free software: you can redistribute it and/or modify
@@ -101,7 +101,7 @@ pub trait StorageDoubleMap {
 	{
 		let mut raw_prefix = Vec::new();
 		raw_prefix.extend(Self::PREFIX);
-		raw_prefix.extend(Encode::encode(&key));
+		key.encode_to(&mut raw_prefix);
 		raw_prefix
 	}
 
@@ -121,7 +121,7 @@ pub trait StorageDoubleMap {
 	fn derive_key2(key2_data: Vec<u8>) -> Vec<u8>;
 
 	/// Returns a compound key that consist of the two parts: (prefix, `k1`) and `k2`.
-	/// The first part is hased and then concatenated with a hash of `k2`.
+	/// The first part is hashed and then concatenated with a hash of `k2`.
 	fn full_key<Q, R>(k1: &Q, k2: &R) -> Vec<u8>
 	where
 		Self::Key1: Borrow<Q>,

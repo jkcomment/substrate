@@ -1,4 +1,4 @@
-// Copyright 2017-2018 Parity Technologies (UK) Ltd.
+// Copyright 2017-2019 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
 // Substrate is free software: you can redistribute it and/or modify
@@ -109,7 +109,7 @@ impl<S, F, Block> BlockchainHeaderBackend<Block> for Blockchain<S, F> where Bloc
 				};
 
 				// if the header is from future or genesis (we never prune genesis) => return
-				if number.is_zero() || self.storage.status(BlockId::Number(number))? != BlockStatus::InChain {
+				if number.is_zero() || self.storage.status(BlockId::Number(number))? == BlockStatus::Unknown {
 					return Ok(None);
 				}
 
@@ -161,6 +161,10 @@ impl<S, F, Block> BlockchainBackend<Block> for Blockchain<S, F> where Block: Blo
 	}
 
 	fn leaves(&self) -> ClientResult<Vec<Block::Hash>> {
+		unimplemented!()
+	}
+
+	fn children(&self, _parent_hash: Block::Hash) -> ClientResult<Vec<Block::Hash>> {
 		unimplemented!()
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2017-2018 Parity Technologies (UK) Ltd.
+// Copyright 2017-2019 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
 // Substrate is free software: you can redistribute it and/or modify
@@ -18,10 +18,119 @@ use client::backend::Backend;
 use client::blockchain::HeaderBackend as BlockchainHeaderBackend;
 use crate::config::Roles;
 use consensus::BlockOrigin;
-use network_libp2p::NodeIndex;
-use crate::sync::SyncState;
 use std::collections::HashSet;
+use std::thread;
+use std::time::Duration;
 use super::*;
+
+fn test_ancestor_search_when_common_is(n: usize) {
+	let _ = ::env_logger::try_init();
+	let mut net = TestNet::new(3);
+
+	net.peer(0).push_blocks(n, false);
+	net.peer(1).push_blocks(n, false);
+	net.peer(2).push_blocks(n, false);
+
+	net.peer(0).push_blocks(10, true);
+	net.peer(1).push_blocks(100, false);
+	net.peer(2).push_blocks(100, false);
+
+	net.restart_peer(0);
+	net.sync();
+	assert!(net.peer(0).client.backend().as_in_memory().blockchain()
+		.canon_equals_to(net.peer(1).client.backend().as_in_memory().blockchain()));
+}
+
+#[test]
+fn sync_peers_works() {
+	let _ = ::env_logger::try_init();
+	let mut net = TestNet::new(3);
+	net.sync();
+	for peer in 0..3 {
+		// Assert peers is up to date.
+		let peers = net.peer(peer).peers.read();
+		assert_eq!(peers.len(), 2);
+		// And then disconnect.
+		for other in 0..3 {
+			if other != peer {
+				net.peer(peer).on_disconnect(net.peer(other));
+			}
+		}
+	}
+	net.sync();
+	// Now peers are disconnected.
+	for peer in 0..3 {
+		let peers = net.peer(peer).peers.read();
+		assert_eq!(peers.len(), 0);
+	}
+}
+
+#[test]
+fn sync_cycle_from_offline_to_syncing_to_offline() {
+	let _ = ::env_logger::try_init();
+	let mut net = TestNet::new(3);
+	for peer in 0..3 {
+		// Offline, and not major syncing.
+		assert!(net.peer(peer).is_offline());
+		assert!(!net.peer(peer).is_major_syncing());
+	}
+
+	// Generate blocks.
+	net.peer(2).push_blocks(100, false);
+	net.start();
+	net.route_fast();
+	thread::sleep(Duration::from_millis(100));
+	net.route_fast();
+	for peer in 0..3 {
+		// Online
+		assert!(!net.peer(peer).is_offline());
+		if peer < 2 {
+			// Major syncing.
+			assert!(net.peer(peer).is_major_syncing());
+		}
+	}
+	net.sync();
+	for peer in 0..3 {
+		// All done syncing.
+		assert!(!net.peer(peer).is_major_syncing());
+	}
+
+	// Now disconnect them all.
+	for peer in 0..3 {
+		for other in 0..3 {
+			if other != peer {
+				net.peer(peer).on_disconnect(net.peer(other));
+			}
+		}
+		thread::sleep(Duration::from_millis(100));
+		assert!(net.peer(peer).is_offline());
+		assert!(!net.peer(peer).is_major_syncing());
+	}
+}
+
+#[test]
+fn syncing_node_not_major_syncing_when_disconnected() {
+	let _ = ::env_logger::try_init();
+	let mut net = TestNet::new(3);
+
+	// Generate blocks.
+	net.peer(2).push_blocks(100, false);
+	net.start();
+	net.route_fast();
+	thread::sleep(Duration::from_millis(100));
+	net.route_fast();
+
+	// Peer 1 is major-syncing.
+	assert!(net.peer(1).is_major_syncing());
+
+	// Disconnect peer 1 form everyone else.
+	net.peer(1).on_disconnect(net.peer(0));
+	net.peer(1).on_disconnect(net.peer(2));
+	thread::sleep(Duration::from_millis(100));
+
+	// Peer 1 is not major-syncing.
+	assert!(!net.peer(1).is_major_syncing());
+}
 
 #[test]
 fn sync_from_two_peers_works() {
@@ -32,8 +141,7 @@ fn sync_from_two_peers_works() {
 	net.sync();
 	assert!(net.peer(0).client.backend().as_in_memory().blockchain()
 		.equals_to(net.peer(1).client.backend().as_in_memory().blockchain()));
-	let status = net.peer(0).status();
-	assert_eq!(status.sync.state, SyncState::Idle);
+	assert!(!net.peer(0).is_major_syncing());
 }
 
 #[test]
@@ -47,6 +155,51 @@ fn sync_from_two_peers_with_ancestry_search_works() {
 	net.sync();
 	assert!(net.peer(0).client.backend().as_in_memory().blockchain()
 		.canon_equals_to(net.peer(1).client.backend().as_in_memory().blockchain()));
+}
+
+#[test]
+fn ancestry_search_works_when_backoff_is_one() {
+	let _ = ::env_logger::try_init();
+	let mut net = TestNet::new(3);
+
+	net.peer(0).push_blocks(1, false);
+	net.peer(1).push_blocks(2, false);
+	net.peer(2).push_blocks(2, false);
+
+	net.restart_peer(0);
+	net.sync();
+	assert!(net.peer(0).client.backend().as_in_memory().blockchain()
+		.canon_equals_to(net.peer(1).client.backend().as_in_memory().blockchain()));
+}
+
+#[test]
+fn ancestry_search_works_when_ancestor_is_genesis() {
+	let _ = ::env_logger::try_init();
+	let mut net = TestNet::new(3);
+
+	net.peer(0).push_blocks(13, true);
+	net.peer(1).push_blocks(100, false);
+	net.peer(2).push_blocks(100, false);
+
+	net.restart_peer(0);
+	net.sync();
+	assert!(net.peer(0).client.backend().as_in_memory().blockchain()
+		.canon_equals_to(net.peer(1).client.backend().as_in_memory().blockchain()));
+}
+
+#[test]
+fn ancestry_search_works_when_common_is_one() {
+	test_ancestor_search_when_common_is(1);
+}
+
+#[test]
+fn ancestry_search_works_when_common_is_two() {
+	test_ancestor_search_when_common_is(2);
+}
+
+#[test]
+fn ancestry_search_works_when_common_is_hundred() {
+	test_ancestor_search_when_common_is(100);
 }
 
 #[test]
@@ -203,13 +356,13 @@ fn blocks_are_not_announced_by_light_nodes() {
 	net.peer(0).start();
 	net.peer(1).start();
 	net.peer(2).start();
-	net.peer(0).on_connect(1);
-	net.peer(1).on_connect(2);
+	net.peer(0).on_connect(net.peer(1));
+	net.peer(1).on_connect(net.peer(2));
 
 	// Only sync between 0 -> 1, and 1 -> 2
 	let mut disconnected = HashSet::new();
-	disconnected.insert(0 as NodeIndex);
-	disconnected.insert(2 as NodeIndex);
+	disconnected.insert(0);
+	disconnected.insert(2);
 	net.sync_with_disconnected(disconnected);
 
 	// peer 0 has the best chain
