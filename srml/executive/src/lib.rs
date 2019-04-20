@@ -14,7 +14,54 @@
 // You should have received a copy of the GNU General Public License
 // along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Executive: Handles all of the top-level stuff; essentially just executing blocks/extrinsics.
+//! # Executive Module
+//!
+//! The Executive module acts as the orchestration layer for the runtime. It dispatches incoming
+//! extrinsic calls to the respective modules in the runtime.
+//!
+//! ## Overview
+//!
+//! The executive module is not a typical SRML module providing functionality around a specific feature.
+//! It is a cross-cutting framework component for the SRML. It works in conjunction with the
+//! [SRML System module](../srml_system/index.html) to perform these cross-cutting functions.
+//!
+//! The Executive module provides functions to:
+//!
+//! - Check transaction validity.
+//! - Initialize a block.
+//! - Apply extrinsics.
+//! - Execute a block.
+//! - Finalize a block.
+//! - Start an off-chain worker.
+//!
+//! ### Implementations
+//!
+//! The Executive module provides the following implementations:
+//!
+//! - `ExecuteBlock`: Trait that can be used to execute a block.
+//! - `Executive`: Type that can be used to make the SRML available from the runtime.
+//!
+//! ## Usage
+//!
+//! The default Substrate node template declares the [`Executive`](./struct.Executive.html) type in its library.
+//!
+//! ### Example
+//!
+//! `Executive` type declaration from the node template.
+//!
+//! ```
+//! # use primitives::generic;
+//! # use srml_executive as executive;
+//! # pub struct UncheckedExtrinsic {};
+//! # pub struct Header {};
+//! # type Context = system::ChainContext<Runtime>;
+//! # pub type Block = generic::Block<Header, UncheckedExtrinsic>;
+//! # pub type Balances = u64;
+//! # pub type AllModules = u64;
+//! # pub enum Runtime {};
+//! /// Executive: handles dispatch to the various modules.
+//! pub type Executive = executive::Executive<Runtime, Block, Context, Balances, AllModules>;
+//! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -22,8 +69,8 @@ use rstd::prelude::*;
 use rstd::marker::PhantomData;
 use rstd::result;
 use primitives::traits::{
-	self, Header, Zero, One, Checkable, Applyable, CheckEqual, OnFinalise,
-	OnInitialise, Hash, As, Digest, NumberFor, Block as BlockT, OffchainWorker
+	self, Header, Zero, One, Checkable, Applyable, CheckEqual, OnFinalize,
+	OnInitialize, Digest, NumberFor, Block as BlockT, OffchainWorker
 };
 use srml_support::{Dispatchable, traits::MakePayment};
 use parity_codec::{Codec, Encode};
@@ -48,12 +95,10 @@ mod internal {
 	}
 }
 
-/// Something that can be used to execute a block.
+/// Trait that can be used to execute a block.
 pub trait ExecuteBlock<Block: BlockT> {
-	/// Actually execute all transitioning for `block`.
+	/// Actually execute all transitions for `block`.
 	fn execute_block(block: Block);
-	/// Execute all extrinsics like when executing a `block`, but with dropping intial and final checks.
-	fn execute_extrinsics_without_checks(block_number: NumberFor<Block>, extrinsics: Vec<Block::Extrinsic>);
 }
 
 pub struct Executive<System, Block, Context, Payment, AllModules>(
@@ -65,7 +110,7 @@ impl<
 	Block: traits::Block<Header=System::Header, Hash=System::Hash>,
 	Context: Default,
 	Payment: MakePayment<System::AccountId>,
-	AllModules: OnInitialise<System::BlockNumber> + OnFinalise<System::BlockNumber> + OffchainWorker<System::BlockNumber>,
+	AllModules: OnInitialize<System::BlockNumber> + OnFinalize<System::BlockNumber> + OffchainWorker<System::BlockNumber>,
 > ExecuteBlock<Block> for Executive<System, Block, Context, Payment, AllModules> where
 	Block::Extrinsic: Checkable<Context> + Codec,
 	<Block::Extrinsic as Checkable<Context>>::Checked: Applyable<Index=System::Index, AccountId=System::AccountId>,
@@ -75,10 +120,6 @@ impl<
 	fn execute_block(block: Block) {
 		Executive::<System, Block, Context, Payment, AllModules>::execute_block(block);
 	}
-
-	fn execute_extrinsics_without_checks(block_number: NumberFor<Block>, extrinsics: Vec<Block::Extrinsic>) {
-		Executive::<System, Block, Context, Payment, AllModules>::execute_extrinsics_without_checks(block_number, extrinsics);
-	}
 }
 
 impl<
@@ -86,7 +127,7 @@ impl<
 	Block: traits::Block<Header=System::Header, Hash=System::Hash>,
 	Context: Default,
 	Payment: MakePayment<System::AccountId>,
-	AllModules: OnInitialise<System::BlockNumber> + OnFinalise<System::BlockNumber> + OffchainWorker<System::BlockNumber>,
+	AllModules: OnInitialize<System::BlockNumber> + OnFinalize<System::BlockNumber> + OffchainWorker<System::BlockNumber>,
 > Executive<System, Block, Context, Payment, AllModules> where
 	Block::Extrinsic: Checkable<Context> + Codec,
 	<Block::Extrinsic as Checkable<Context>>::Checked: Applyable<Index=System::Index, AccountId=System::AccountId>,
@@ -94,34 +135,34 @@ impl<
 	<<<Block::Extrinsic as Checkable<Context>>::Checked as Applyable>::Call as Dispatchable>::Origin: From<Option<System::AccountId>>
 {
 	/// Start the execution of a particular block.
-	pub fn initialise_block(header: &System::Header) {
-		Self::initialise_block_impl(header.number(), header.parent_hash(), header.extrinsics_root());
+	pub fn initialize_block(header: &System::Header) {
+		Self::initialize_block_impl(header.number(), header.parent_hash(), header.extrinsics_root());
 	}
 
-	fn initialise_block_impl(block_number: &System::BlockNumber, parent_hash: &System::Hash, extrinsics_root: &System::Hash) {
-		<system::Module<System>>::initialise(block_number, parent_hash, extrinsics_root);
-		<AllModules as OnInitialise<System::BlockNumber>>::on_initialise(*block_number);
+	fn initialize_block_impl(block_number: &System::BlockNumber, parent_hash: &System::Hash, extrinsics_root: &System::Hash) {
+		<system::Module<System>>::initialize(block_number, parent_hash, extrinsics_root);
+		<AllModules as OnInitialize<System::BlockNumber>>::on_initialize(*block_number);
 	}
 
 	fn initial_checks(block: &Block) {
 		let header = block.header();
 
-		// check parent_hash is correct.
+		// Check that `parent_hash` is correct.
 		let n = header.number().clone();
 		assert!(
 			n > System::BlockNumber::zero() && <system::Module<System>>::block_hash(n - System::BlockNumber::one()) == *header.parent_hash(),
 			"Parent hash should be valid."
 		);
 
-		// check transaction trie root represents the transactions.
+		// Check that transaction trie root represents the transactions.
 		let xts_root = extrinsics_root::<System::Hashing, _>(&block.extrinsics());
 		header.extrinsics_root().check_equal(&xts_root);
 		assert!(header.extrinsics_root() == &xts_root, "Transaction trie root must be valid.");
 	}
 
-	/// Actually execute all transitioning for `block`.
+	/// Actually execute all transitions for `block`.
 	pub fn execute_block(block: Block) {
-		Self::initialise_block(block.header());
+		Self::initialize_block(block.header());
 
 		// any initial checks
 		Self::initial_checks(&block);
@@ -134,36 +175,24 @@ impl<
 		Self::final_checks(&header);
 	}
 
-	/// Execute all extrinsics like when executing a `block`, but with dropping intial and final checks.
-	pub fn execute_extrinsics_without_checks(block_number: NumberFor<Block>, extrinsics: Vec<Block::Extrinsic>) {
-		// Make the api happy, but maybe we should not set them at all.
-		let parent_hash = <Block::Header as Header>::Hashing::hash(b"parent_hash");
-		let extrinsics_root = <Block::Header as Header>::Hashing::hash(b"extrinsics_root");
-
-		Self::initialise_block_impl(&block_number, &parent_hash, &extrinsics_root);
-
-		// execute extrinsics
-		Self::execute_extrinsics_with_book_keeping(extrinsics, block_number);
-	}
-
-	/// Execute given extrinsics and take care of post-extrinsics book-keeping
+	/// Execute given extrinsics and take care of post-extrinsics book-keeping.
 	fn execute_extrinsics_with_book_keeping(extrinsics: Vec<Block::Extrinsic>, block_number: NumberFor<Block>) {
 		extrinsics.into_iter().for_each(Self::apply_extrinsic_no_note);
 
-		// post-extrinsics book-keeping.
+		// post-extrinsics book-keeping
 		<system::Module<System>>::note_finished_extrinsics();
-		<AllModules as OnFinalise<System::BlockNumber>>::on_finalise(block_number);
+		<AllModules as OnFinalize<System::BlockNumber>>::on_finalize(block_number);
 	}
 
-	/// Finalise the block - it is up the caller to ensure that all header fields are valid
+	/// Finalize the block - it is up the caller to ensure that all header fields are valid
 	/// except state-root.
-	pub fn finalise_block() -> System::Header {
+	pub fn finalize_block() -> System::Header {
 		<system::Module<System>>::note_finished_extrinsics();
-		<AllModules as OnFinalise<System::BlockNumber>>::on_finalise(<system::Module<System>>::block_number());
+		<AllModules as OnFinalize<System::BlockNumber>>::on_finalize(<system::Module<System>>::block_number());
 
-		// setup extrinsics
+		// set up extrinsics
 		<system::Module<System>>::derive_extrinsics();
-		<system::Module<System>>::finalise()
+		<system::Module<System>>::finalize()
 	}
 
 	/// Apply extrinsic outside of the block execution function.
@@ -198,7 +227,7 @@ impl<
 
 	/// Actually apply an extrinsic given its `encoded_len`; this doesn't note its hash.
 	fn apply_extrinsic_with_len(uxt: Block::Extrinsic, encoded_len: usize, to_note: Option<Vec<u8>>) -> result::Result<internal::ApplyOutcome, internal::ApplyError> {
-		// Verify the signature is good.
+		// Verify that the signature is good.
 		let xt = uxt.check(&Default::default()).map_err(internal::ApplyError::BadSignature)?;
 
 		// Check the size of the block if that extrinsic is applied.
@@ -213,7 +242,7 @@ impl<
 				if index < &expected_index { internal::ApplyError::Stale } else { internal::ApplyError::Future }
 			) }
 
-			// pay any fees.
+			// pay any fees
 			Payment::make_payment(sender, encoded_len).map_err(|_| internal::ApplyError::CantPay)?;
 
 			// AUDIT: Under no circumstances may this function panic from here onwards.
@@ -222,13 +251,13 @@ impl<
 			<system::Module<System>>::inc_account_nonce(sender);
 		}
 
-		// make sure to `note_extrinsic` only after we know it's going to be executed
+		// Make sure to `note_extrinsic` only after we know it's going to be executed
 		// to prevent it from leaking in storage.
 		if let Some(encoded) = to_note {
 			<system::Module<System>>::note_extrinsic(encoded);
 		}
 
-		// decode parameters and dispatch
+		// Decode parameters and dispatch
 		let (f, s) = xt.deconstruct();
 		let r = f.dispatch(s.into());
 		<system::Module<System>>::note_applied_extrinsic(&r, encoded_len as u32);
@@ -240,10 +269,10 @@ impl<
 	}
 
 	fn final_checks(header: &System::Header) {
-		// remove temporaries.
-		let new_header = <system::Module<System>>::finalise();
+		// remove temporaries
+		let new_header = <system::Module<System>>::finalize();
 
-		// check digest.
+		// check digest
 		assert_eq!(
 			header.digest().logs().len(),
 			new_header.digest().logs().len(),
@@ -256,15 +285,15 @@ impl<
 		}
 
 		// check storage root.
-		let storage_root = System::Hashing::storage_root();
+		let storage_root = new_header.state_root();
 		header.state_root().check_equal(&storage_root);
-		assert!(header.state_root() == &storage_root, "Storage root must match that calculated.");
+		assert!(header.state_root() == storage_root, "Storage root must match that calculated.");
 	}
 
 	/// Check a given transaction for validity. This doesn't execute any
 	/// side-effects; it merely checks whether the transaction would panic if it were included or not.
 	///
-	/// Changes made to the storage should be discarded.
+	/// Changes made to storage should be discarded.
 	pub fn validate_transaction(uxt: Block::Extrinsic) -> TransactionValidity {
 		// Note errors > 0 are from ApplyError
 		const UNKNOWN_ERROR: i8 = -127;
@@ -285,30 +314,29 @@ impl<
 		};
 
 		if let (Some(sender), Some(index)) = (xt.sender(), xt.index()) {
-			// pay any fees.
+			// pay any fees
 			if Payment::make_payment(sender, encoded_len).is_err() {
 				return TransactionValidity::Invalid(ApplyError::CantPay as i8)
 			}
 
 			// check index
-			let mut expected_index = <system::Module<System>>::account_nonce(sender);
+			let expected_index = <system::Module<System>>::account_nonce(sender);
 			if index < &expected_index {
 				return TransactionValidity::Invalid(ApplyError::Stale as i8)
 			}
-			if *index > expected_index + As::sa(256) {
-				return TransactionValidity::Unknown(ApplyError::Future as i8)
-			}
 
-			let mut deps = Vec::new();
-			while expected_index < *index {
-				deps.push((sender, expected_index).encode());
-				expected_index = expected_index + One::one();
-			}
+			let index = *index;
+			let provides = vec![(sender, index).encode()];
+			let requires = if expected_index < index {
+				vec![(sender, index - One::one()).encode()]
+			} else {
+				vec![]
+			};
 
 			TransactionValidity::Valid {
 				priority: encoded_len as TransactionPriority,
-				requires: deps,
-				provides: vec![(sender, *index).encode()],
+				requires,
+				provides,
 				longevity: TransactionLongevity::max_value(),
 			}
 		} else {
@@ -394,7 +422,7 @@ mod tests {
 		let xt = primitives::testing::TestXt(Some(1), 0, Call::transfer(2, 69));
 		let mut t = runtime_io::TestExternalities::<Blake2Hasher>::new(t);
 		with_externalities(&mut t, || {
-			Executive::initialise_block(&Header::new(1, H256::default(), H256::default(),
+			Executive::initialize_block(&Header::new(1, H256::default(), H256::default(),
 				[69u8; 32].into(), Digest::default()));
 			Executive::apply_extrinsic(xt).unwrap();
 			assert_eq!(<balances::Module<Runtime>>::total_balance(&1), 32);
@@ -463,7 +491,7 @@ mod tests {
 		let mut t = new_test_ext();
 		let xt = primitives::testing::TestXt(Some(1), 42, Call::transfer(33, 69));
 		with_externalities(&mut t, || {
-			Executive::initialise_block(&Header::new(1, H256::default(), H256::default(), [69u8; 32].into(), Digest::default()));
+			Executive::initialize_block(&Header::new(1, H256::default(), H256::default(), [69u8; 32].into(), Digest::default()));
 			assert!(Executive::apply_extrinsic(xt).is_err());
 			assert_eq!(<system::Module<Runtime>>::extrinsic_index(), Some(0));
 		});
@@ -478,7 +506,7 @@ mod tests {
 			let encoded = xt2.encode();
 			let len = if should_fail { (internal::MAX_TRANSACTIONS_SIZE - 1) as usize } else { encoded.len() };
 			with_externalities(&mut t, || {
-				Executive::initialise_block(&Header::new(1, H256::default(), H256::default(), [69u8; 32].into(), Digest::default()));
+				Executive::initialize_block(&Header::new(1, H256::default(), H256::default(), [69u8; 32].into(), Digest::default()));
 				assert_eq!(<system::Module<Runtime>>::all_extrinsics_len(), 0);
 
 				Executive::apply_extrinsic(xt).unwrap();

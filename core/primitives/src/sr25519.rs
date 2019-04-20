@@ -231,8 +231,10 @@ pub struct LocalizedSignature {
 impl Signature {
 	/// A new instance from the given 64-byte `data`.
 	///
-	/// NOTE: No checking goes on to ensure this is a real signature. Only use it if
-	/// you are certain that the array actually is a signature. GIGO!
+	/// NOTE: No checking goes on to ensure this is a real signature. Only use
+	/// it if you are certain that the array actually is a signature, or if you
+	/// immediately verify the signature.  All functions that verify signatures
+	/// will fail if the `Signature` is not actually a valid signature.
 	pub fn from_raw(data: [u8; 64]) -> Signature {
 		Signature(data)
 	}
@@ -630,13 +632,6 @@ mod test {
 		println!("Correct: {}", s);
 		let cmp = Public::from_ss58check(&s).unwrap();
 		assert_eq!(cmp, public);
-	}
-
-	#[test]
-	fn ss58check_known_works() {
-		let k = "5CGavy93sZgPPjHyziRohwVumxiHXMGmQLyuqQP4ZFx5vRU9";
-		let enc = hex!["090fa15cb5b1666222fff584b4cc2b1761fe1e238346b340491b37e25ea183ff"];
-		assert_eq!(Public::from_ss58check(k).unwrap(), Public::from_raw(enc));
 	}
 
 	#[test]

@@ -16,7 +16,8 @@
 
 //! `NodeCodec` implementation for Substrate's trie format.
 
-use std::marker::PhantomData;
+use rstd::marker::PhantomData;
+use rstd::vec::Vec;
 use codec::{Encode, Decode, Compact};
 use hash_db::Hasher;
 use trie_db::{self, DBValue, NibbleSlice, node::Node, ChildReference};
@@ -28,10 +29,6 @@ use super::{EMPTY_TRIE, LEAF_NODE_OFFSET, LEAF_NODE_BIG, EXTENSION_NODE_OFFSET,
 #[derive(Default, Clone)]
 pub struct NodeCodec<H: Hasher>(PhantomData<H>);
 
-// NOTE: what we'd really like here is:
-// `impl<H: Hasher> NodeCodec<H> for RlpNodeCodec<H> where H::Out: Decodable`
-// but due to the current limitations of Rust const evaluation we can't
-// do `const HASHED_NULL_NODE: H::Out = H::Out( … … )`. Perhaps one day soon?
 impl<H: Hasher> trie_db::NodeCodec<H> for NodeCodec<H> {
 	type Error = Error;
 
@@ -39,7 +36,7 @@ impl<H: Hasher> trie_db::NodeCodec<H> for NodeCodec<H> {
 		H::hash(&[0u8][..])
 	}
 
-	fn decode(data: &[u8]) -> ::std::result::Result<Node, Self::Error> {
+	fn decode(data: &[u8]) -> ::rstd::result::Result<Node, Self::Error> {
 		use Error::BadFormat;
 		let input = &mut &*data;
 		match NodeHeader::decode(input).ok_or(BadFormat)? {
@@ -64,12 +61,18 @@ impl<H: Hasher> trie_db::NodeCodec<H> for NodeCodec<H> {
 				Ok(Node::Branch(children, value))
 			}
 			NodeHeader::Extension(nibble_count) => {
+				if nibble_count % 2 == 1 && input[0] & 0xf0 != 0x00 {
+					return Err(BadFormat);
+				}
 				let nibble_data = take(input, (nibble_count + 1) / 2).ok_or(BadFormat)?;
 				let nibble_slice = NibbleSlice::new_offset(nibble_data, nibble_count % 2);
 				let count = <Compact<u32>>::decode(input).ok_or(BadFormat)?.0 as usize;
 				Ok(Node::Extension(nibble_slice, take(input, count).ok_or(BadFormat)?))
 			}
 			NodeHeader::Leaf(nibble_count) => {
+				if nibble_count % 2 == 1 && input[0] & 0xf0 != 0x00 {
+					return Err(BadFormat);
+				}
 				let nibble_data = take(input, (nibble_count + 1) / 2).ok_or(BadFormat)?;
 				let nibble_slice = NibbleSlice::new_offset(nibble_data, nibble_count % 2);
 				let count = <Compact<u32>>::decode(input).ok_or(BadFormat)?.0 as usize;
@@ -92,7 +95,7 @@ impl<H: Hasher> trie_db::NodeCodec<H> for NodeCodec<H> {
 		data == &[EMPTY_TRIE][..]
 	}
 	fn empty_node() -> Vec<u8> {
-		vec![EMPTY_TRIE]
+		[EMPTY_TRIE].to_vec()
 	}
 
 	// FIXME: refactor this so that `partial` isn't already encoded with HPE. Should just be an `impl Iterator<Item=u8>`.
@@ -117,7 +120,7 @@ impl<H: Hasher> trie_db::NodeCodec<H> for NodeCodec<H> {
 	fn branch_node<I>(children: I, maybe_value: Option<DBValue>) -> Vec<u8>
 		where I: IntoIterator<Item=Option<ChildReference<H::Out>>> + Iterator<Item=Option<ChildReference<H::Out>>>
 	{
-		let mut output = vec![0, 0, 0];
+		let mut output = [0, 0, 0].to_vec();
 		let have_value = if let Some(value) = maybe_value {
 			(&*value).encode_to(&mut output);
 			true

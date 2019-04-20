@@ -38,7 +38,10 @@ pub mod specialization;
 pub mod test;
 
 pub use chain::Client as ClientHandle;
-pub use service::{Service, FetchFuture, TransactionPool, ManageNetwork, NetworkMsg, SyncProvider, ExHashT};
+pub use service::{
+	Service, FetchFuture, TransactionPool, ManageNetwork, NetworkMsg,
+	SyncProvider, ExHashT, ReportHandle,
+};
 pub use protocol::{ProtocolStatus, PeerInfo, Context};
 pub use sync::{Status as SyncStatus, SyncState};
 pub use network_libp2p::{
@@ -48,7 +51,7 @@ pub use network_libp2p::{
 	NodeKeyConfig, Secret, Secp256k1Secret, Ed25519Secret,
 	build_multiaddr, PeerId, PublicKey
 };
-pub use message::{generic as generic_message, RequestId, Status as StatusMessage, ConsensusEngineId};
+pub use message::{generic as generic_message, RequestId, Status as StatusMessage};
 pub use error::Error;
 pub use on_demand::{OnDemand, OnDemandService, RemoteResponse};
 #[doc(hidden)]

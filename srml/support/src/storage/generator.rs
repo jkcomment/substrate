@@ -48,6 +48,8 @@
 
 use crate::codec;
 use crate::rstd::vec::Vec;
+#[cfg(feature = "std")]
+use crate::storage::unhashed::generator::UnhashedStorage;
 #[doc(hidden)]
 pub use crate::rstd::borrow::Borrow;
 #[doc(hidden)]
@@ -95,26 +97,39 @@ pub trait Storage {
 
 	/// Take a value from storage, deleting it after reading.
 	fn take_or_default<T: codec::Decode + Default>(&self, key: &[u8]) -> T { self.take(key).unwrap_or_default() }
+
+	/// Get a Vec of bytes from storage.
+	fn get_raw(&self, key: &[u8]) -> Option<Vec<u8>>;
+
+	/// Put a raw byte slice into storage.
+	fn put_raw(&self, key: &[u8], value: &[u8]);
 }
 
 // We use a construct like this during when genesis storage is being built.
 #[cfg(feature = "std")]
 impl<S: sr_primitives::BuildStorage> Storage for (crate::rstd::cell::RefCell<&mut sr_primitives::StorageOverlay>, PhantomData<S>) {
 	fn exists(&self, key: &[u8]) -> bool {
-		self.0.borrow().contains_key(S::hash(key).as_ref())
+		UnhashedStorage::exists(self, &S::hash(key))
 	}
 
 	fn get<T: codec::Decode>(&self, key: &[u8]) -> Option<T> {
-		self.0.borrow().get(S::hash(key).as_ref())
-			.map(|x| codec::Decode::decode(&mut x.as_slice()).expect("Unable to decode expected type."))
+		UnhashedStorage::get(self, &S::hash(key))
 	}
 
 	fn put<T: codec::Encode>(&self, key: &[u8], val: &T) {
-		self.0.borrow_mut().insert(S::hash(key).to_vec(), codec::Encode::encode(val));
+		UnhashedStorage::put(self, &S::hash(key), val)
 	}
 
 	fn kill(&self, key: &[u8]) {
-		self.0.borrow_mut().remove(S::hash(key).as_ref());
+		UnhashedStorage::kill(self, &S::hash(key))
+	}
+
+	fn get_raw(&self, key: &[u8]) -> Option<Vec<u8>> {
+		UnhashedStorage::get_raw(self, key)
+	}
+
+	fn put_raw(&self, key: &[u8], value: &[u8]) {
+		UnhashedStorage::put_raw(self, key, value)
 	}
 }
 
@@ -148,6 +163,20 @@ pub trait StorageValue<T: codec::Codec> {
 	/// Clear the storage value.
 	fn kill<S: Storage>(storage: &S) {
 		storage.kill(Self::key())
+	}
+
+	/// Append the given items to the value in the storage.
+	///
+	/// `T` is required to implement `codec::EncodeAppend`.
+	fn append<S: Storage, I: codec::Encode>(
+		items: &[I], storage: &S
+	) -> Result<(), &'static str> where T: codec::EncodeAppend<Item=I> {
+		let new_val = <T as codec::EncodeAppend>::append(
+			storage.get_raw(Self::key()).unwrap_or_default(),
+			items,
+		).ok_or_else(|| "Could not append given item")?;
+		storage.put_raw(Self::key(), &new_val);
+		Ok(())
 	}
 }
 
@@ -226,7 +255,7 @@ pub trait EnumerableStorageMap<K: codec::Codec, V: codec::Codec>: StorageMap<K, 
 	fn enumerate<'a, S: Storage>(storage: &'a S) -> Box<dyn Iterator<Item = (K, V)> + 'a> where K: 'a, V: 'a;
 }
 
-// FIXME #1466 Remove this in favour of `decl_storage` macro.
+// FIXME #1466 Remove this in favor of `decl_storage` macro.
 /// Declares strongly-typed wrappers around codec-compatible types in storage.
 #[macro_export]
 macro_rules! storage_items {
@@ -574,6 +603,14 @@ mod tests {
 
 		fn kill(&self, key: &[u8]) {
 			self.borrow_mut().remove(key);
+		}
+
+		fn put_raw(&self, key: &[u8], value: &[u8]) {
+			self.borrow_mut().insert(key.to_owned(), value.to_owned());
+		}
+
+		fn get_raw(&self, key: &[u8]) -> Option<Vec<u8>> {
+			self.borrow().get(key).cloned()
 		}
 	}
 

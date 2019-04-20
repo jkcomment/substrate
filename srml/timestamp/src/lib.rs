@@ -15,49 +15,55 @@
 // along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
 
 //! # Timestamp Module
-//! 
-//! The timestamp module provides functionality to get and set the on-chain time. 
-//! To use it in your module, you need to implement the timestamp [`Trait`]. 
-//! The supported dispatchable functions are documented as part of the [`Call`] enum.
-//! 
-//! ## Overview
-//! 
-//! The timestamp module allows the validators to set and validate a timestamp with each block. 
 //!
-//! It uses inherents for timestamp data, which is provided by the block author and validated/verified by other validators. 
-//! The timestamp can be set only once per block and must be set each block. There could be a constraint on how much time must pass before setting the new timestamp.
-//! 
-//! **NOTE:** The timestamp module is the recommended way to query the on-chain time instead of using an approach based on block numbers. 
-//! The block numbers based time measurement can cause issues because of cummulative calculation errors and hence it should be avoided.
-//! 
+//! The Timestamp module provides functionality to get and set the on-chain time.
+//!
+//! - [`timestamp::Trait`](./trait.Trait.html)
+//! - [`Call`](./enum.Call.html)
+//! - [`Module`](./struct.Module.html)
+//!
+//! ## Overview
+//!
+//! The Timestamp module allows the validators to set and validate a timestamp with each block.
+//!
+//! It uses inherents for timestamp data, which is provided by the block author and validated/verified
+//! by other validators. The timestamp can be set only once per block and must be set each block.
+//! There could be a constraint on how much time must pass before setting the new timestamp.
+//!
+//! **NOTE:** The Timestamp module is the recommended way to query the on-chain time instead of using
+//! an approach based on block numbers. The block number based time measurement can cause issues
+//! because of cumulative calculation errors and hence should be avoided.
+//!
 //! ## Interface
-//! 
-//! ### Dispatchable functions ([`Call`])
-//! 
+//!
+//! ### Dispatchable Functions
+//!
 //! * `set` - Sets the current time.
-//! 
-//! ### Public functions ([`Module`])
-//! 
-//! * `get` - Gets the current time for the current block. If this function is called prior the setting to timestamp, it will return the timestamp of the previous block.
-//! 
-//! * `block_period` - Gets the minimum (and advised) period between blocks for the chain.
-//! 
+//!
+//! ### Public functions
+//!
+//! * `get` - Gets the current time for the current block. If this function is called prior to
+//! setting the timestamp, it will return the timestamp of the previous block.
+//! * `minimum_period` - Gets the minimum (and advised) period between blocks for the chain.
+//!
 //! ## Usage
-//! 
-//! The following example shows how to use the timestamp module in your custom module to query the current timestamp.
-//! 
+//!
+//! The following example shows how to use the Timestamp module in your custom module to query the current timestamp.
+//!
 //! ### Prerequisites
-//! 
-//! Import the `timestamp` module in your custom module and derive the module configuration trait from the `timestamp` trait.
-//! 
+//!
+//! Import the Timestamp module into your custom module and derive the module configuration
+//! trait from the timestamp trait.
+//!
 //! ### Get current timestamp
-//! 
-//! ```ignore
-//! use support::{decl_module, dispatch::Result};
+//!
+//! ```
+//! use srml_support::{decl_module, dispatch::Result};
+//! # use srml_timestamp as timestamp;
 //! use system::ensure_signed;
-//! 
+//!
 //! pub trait Trait: timestamp::Trait {}
-//! 
+//!
 //! decl_module! {
 //! 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
 //! 		pub fn get_time(origin) -> Result {
@@ -67,17 +73,17 @@
 //! 		}
 //! 	}
 //! }
+//! # fn main() {}
 //! ```
-//! 
-//! ### Example from SRML
-//! 
-//! The [`Session` module](https://github.com/paritytech/substrate/blob/master/srml/session/src/lib.rs) uses the `timestamp` module for session management.
-//! 
-//! ## Related Modules
-//! 
-//! * [`System`](https://crates.parity.io/srml_system/index.html)
-//! * [`Session`](https://crates.parity.io/srml_session/index.html)
 //!
+//! ### Example from the SRML
+//!
+//! The [Session module](https://github.com/paritytech/substrate/blob/master/srml/session/src/lib.rs) uses
+//! the Timestamp module for session management.
+//!
+//! ## Related Modules
+//!
+//! * [Session](../srml_session/index.html)
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -211,15 +217,15 @@ decl_module! {
 		/// This call should be invoked exactly once per block. It will panic at the finalization phase,
 		/// if this call hasn't been invoked by that time.
 		///
-		/// The timestamp should be greater than the previous one by the amount specified by `block_period`.
-		/// 
+		/// The timestamp should be greater than the previous one by the amount specified by `minimum_period`.
+		///
 		/// The dispatch origin for this call must be `Inherent`.
 		fn set(origin, #[compact] now: T::Moment) {
 			ensure_inherent(origin)?;
 			assert!(!<Self as Store>::DidUpdate::exists(), "Timestamp must be updated only once in the block");
 			assert!(
-				Self::now().is_zero() || now >= Self::now() + Self::block_period(),
-				"Timestamp must increment by at least <BlockPeriod> between sequential blocks"
+				Self::now().is_zero() || now >= Self::now() + <MinimumPeriod<T>>::get(),
+				"Timestamp must increment by at least <MinimumPeriod> between sequential blocks"
 			);
 			<Self as Store>::Now::put(now.clone());
 			<Self as Store>::DidUpdate::put(true);
@@ -227,7 +233,17 @@ decl_module! {
 			<T::OnTimestampSet as OnTimestampSet<_>>::on_timestamp_set(now);
 		}
 
-		fn on_finalise() {
+		// Manage upgrade. Remove after all networks upgraded.
+		// TODO: #2133
+		fn on_initialize() {
+			if let Some(period) = <BlockPeriod<T>>::take() {
+				if !<MinimumPeriod<T>>::exists() {
+					<MinimumPeriod<T>>::put(period)
+				}
+			}
+		}
+
+		fn on_finalize() {
 			assert!(<Self as Store>::DidUpdate::take(), "Timestamp must be updated once in the block");
 		}
 	}
@@ -238,8 +254,15 @@ decl_storage! {
 		/// Current time for the current block.
 		pub Now get(now) build(|_| T::Moment::sa(0)): T::Moment;
 
-		/// The minimum (and advised) period between blocks.
-		pub BlockPeriod get(block_period) config(period): T::Moment = T::Moment::sa(5);
+		/// Old storage item provided for compatibility. Remove after all networks upgraded.
+		// TODO: #2133
+		pub BlockPeriod: Option<T::Moment>;
+
+		/// The minimum period between blocks. Beware that this is different to the *expected* period
+		/// that the block production apparatus provides. Your chosen consensus system will generally
+		/// work with this to determine a sensible block time. e.g. For Aura, it will be double this
+		/// period on default settings.
+		pub MinimumPeriod get(minimum_period) config(): T::Moment = T::Moment::sa(3);
 
 		/// Did the timestamp get updated in this block?
 		DidUpdate: bool;
@@ -276,7 +299,7 @@ impl<T: Trait> ProvideInherent for Module<T> {
 	fn create_inherent(data: &InherentData) -> Option<Self::Call> {
 		let data = extract_inherent_data(data).expect("Gets and decodes timestamp inherent data");
 
-		let next_time = cmp::max(As::sa(data), Self::now() + Self::block_period());
+		let next_time = cmp::max(As::sa(data), Self::now() + <MinimumPeriod<T>>::get());
 		Some(Call::set(next_time.into()))
 	}
 
@@ -290,7 +313,7 @@ impl<T: Trait> ProvideInherent for Module<T> {
 
 		let data = extract_inherent_data(data).map_err(|e| InherentError::Other(e))?;
 
-		let minimum = (Self::now() + Self::block_period()).as_();
+		let minimum = (Self::now() + <MinimumPeriod<T>>::get()).as_();
 		if t > data + MAX_TIMESTAMP_DRIFT {
 			Err(InherentError::Other("Timestamp too far in future to accept".into()))
 		} else if t < minimum {
@@ -341,7 +364,7 @@ mod tests {
 	fn timestamp_works() {
 		let mut t = system::GenesisConfig::<Test>::default().build_storage().unwrap().0;
 		t.extend(GenesisConfig::<Test> {
-			period: 5,
+			minimum_period: 5,
 		}.build_storage().unwrap().0);
 
 		with_externalities(&mut TestExternalities::new(t), || {
@@ -356,7 +379,7 @@ mod tests {
 	fn double_timestamp_should_fail() {
 		let mut t = system::GenesisConfig::<Test>::default().build_storage().unwrap().0;
 		t.extend(GenesisConfig::<Test> {
-			period: 5,
+			minimum_period: 5,
 		}.build_storage().unwrap().0);
 
 		with_externalities(&mut TestExternalities::new(t), || {
@@ -367,11 +390,11 @@ mod tests {
 	}
 
 	#[test]
-	#[should_panic(expected = "Timestamp must increment by at least <BlockPeriod> between sequential blocks")]
-	fn block_period_is_enforced() {
+	#[should_panic(expected = "Timestamp must increment by at least <MinimumPeriod> between sequential blocks")]
+	fn block_period_minimum_enforced() {
 		let mut t = system::GenesisConfig::<Test>::default().build_storage().unwrap().0;
 		t.extend(GenesisConfig::<Test> {
-			period: 5,
+			minimum_period: 5,
 		}.build_storage().unwrap().0);
 
 		with_externalities(&mut TestExternalities::new(t), || {

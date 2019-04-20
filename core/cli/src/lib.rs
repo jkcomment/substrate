@@ -39,7 +39,7 @@ use network::{
 use primitives::H256;
 
 use std::{
-	io::{Write, Read, stdin, stdout}, iter, fs::{self, File}, net::{Ipv4Addr, SocketAddr},
+	io::{Write, Read, stdin, stdout, ErrorKind}, iter, fs::{self, File}, net::{Ipv4Addr, SocketAddr},
 	path::{Path, PathBuf}, str::FromStr,
 };
 
@@ -359,6 +359,8 @@ fn fill_network_configuration(
 	config.in_peers = cli.in_peers;
 	config.out_peers = cli.out_peers;
 
+	config.enable_mdns = !cli.no_mdns;
+
 	Ok(())
 }
 
@@ -473,6 +475,18 @@ where
 	config.rpc_ws = Some(
 		parse_address(&format!("{}:{}", ws_interface, 9944), cli.ws_port)?
 	);
+	let is_dev = cli.shared_params.dev;
+	config.rpc_cors = cli.rpc_cors.unwrap_or_else(|| if is_dev {
+		log::warn!("Running in --dev mode, RPC CORS has been disabled.");
+		None
+	} else {
+		Some(vec![
+			"http://localhost:*".into(),
+			"https://localhost:*".into(),
+			"https://polkadot.js.org".into(),
+			"https://substrate-ui.parity.io".into(),
+		])
+	});
 
 	// Override telemetry
 	if cli.no_telemetry {
@@ -666,10 +680,17 @@ where
 		}
 	}
 
-	fs::remove_dir_all(&db_path)?;
-	println!("{:?} removed.", &db_path);
-
-	Ok(())
+	match fs::remove_dir_all(&db_path) {
+		Result::Ok(_) => {
+			println!("{:?} removed.", &db_path);
+			Ok(())
+		},
+		Result::Err(ref err) if err.kind() == ErrorKind::NotFound => {
+			println!("{:?} did not exist.", &db_path);
+			Ok(())
+		},
+		Result::Err(err) => Result::Err(err.into())
+	}
 }
 
 fn parse_address(

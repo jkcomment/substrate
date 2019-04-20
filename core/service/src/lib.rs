@@ -48,6 +48,7 @@ pub use chain_spec::{ChainSpec, Properties};
 pub use transaction_pool::txpool::{
 	self, Pool as TransactionPool, Options as TransactionPoolOptions, ChainApi, IntoPoolError
 };
+use client::runtime_api::BlockT;
 pub use client::FinalityNotifications;
 
 pub use components::{ServiceFactory, FullBackend, FullExecutor, LightBackend,
@@ -153,7 +154,15 @@ impl<Components: components::Components> Service<Components> {
 		};
 
 		let protocol_id = {
-			let protocol_id_full = config.chain_spec.protocol_id().unwrap_or(DEFAULT_PROTOCOL_ID).as_bytes();
+			let protocol_id_full = match config.chain_spec.protocol_id() {
+				Some(pid) => pid,
+				None => {
+					warn!("Using default protocol ID {:?} because none is configured in the \
+						chain specs", DEFAULT_PROTOCOL_ID
+					);
+					DEFAULT_PROTOCOL_ID
+				}
+			}.as_bytes();
 			let mut protocol_id = network::ProtocolId::default();
 			if protocol_id_full.len() > protocol_id.len() {
 				warn!("Protocol ID truncated to {} chars", protocol_id.len());
@@ -227,9 +236,9 @@ impl<Components: components::Components> Service<Components> {
 			// A utility stream that drops all ready items and only returns the last one.
 			// This is used to only keep the last finality notification and avoid
 			// overloading the sync module with notifications.
-			struct MostRecentNotification<B: network::BlockT>(futures::stream::Fuse<FinalityNotifications<B>>);
+			struct MostRecentNotification<B: BlockT>(futures::stream::Fuse<FinalityNotifications<B>>);
 
-			impl<B: network::BlockT> Stream for MostRecentNotification<B> {
+			impl<B: BlockT> Stream for MostRecentNotification<B> {
 				type Item = <FinalityNotifications<B> as Stream>::Item;
 				type Error = <FinalityNotifications<B> as Stream>::Error;
 
@@ -292,7 +301,7 @@ impl<Components: components::Components> Service<Components> {
 		};
 		let rpc = Components::RuntimeServices::start_rpc(
 			client.clone(), network.clone(), has_bootnodes, system_info, config.rpc_http,
-			config.rpc_ws, task_executor.clone(), transaction_pool.clone(),
+			config.rpc_ws, config.rpc_cors.clone(), task_executor.clone(), transaction_pool.clone(),
 		)?;
 
 		// Telemetry

@@ -28,7 +28,7 @@ use log::{debug, error, warn};
 use smallvec::{smallvec, SmallVec};
 use std::{error, fmt, io, marker::PhantomData, mem, time::Duration, time::Instant};
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_timer::Delay;
+use tokio_timer::{Delay, clock::Clock};
 use void::Void;
 
 /// Implements the `IntoProtocolsHandler` trait of libp2p.
@@ -36,10 +36,35 @@ use void::Void;
 /// Every time a connection with a remote starts, an instance of this struct is created and
 /// sent to a background task dedicated to this connection. Once the connection is established,
 /// it is turned into a `CustomProtoHandler`. It then handles all communications that are specific
-/// to Substrate on that connection.
+/// to Substrate on that single connection.
 ///
 /// Note that there can be multiple instance of this struct simultaneously for same peer. However
-/// if that happens, only one main instance can communicate with the outer layers of the code.
+/// if that happens, only one main instance can communicate with the outer layers of the code. In
+/// other words, the outer layers of the code only ever see one handler.
+///
+/// ## State of the handler
+///
+/// There are six possible states for the handler:
+///
+/// - Enabled and open, which is a normal operation.
+/// - Enabled and closed, in which case it will try to open substreams.
+/// - Disabled and open, in which case it will try to close substreams.
+/// - Disabled and closed, in which case the handler is idle. The connection will be
+///   garbage-collected after a few seconds if nothing more happens.
+/// - Initializing and open.
+/// - Initializing and closed, which is the state the handler starts in.
+///
+/// The Init/Enabled/Disabled state is entirely controlled by the user by sending `Enable` or
+/// `Disable` messages to the handler. The handler itself never transitions automatically between
+/// these states. For example, if the handler reports a network misbehaviour, it will close the
+/// substreams but it is the role of the user to send a `Disabled` event if it wants the connection
+/// to close. Otherwise, the handler will try to reopen substreams.
+/// The handler starts in the "Initializing" state and must be transitionned to Enabled or Disabled
+/// as soon as possible.
+///
+/// The Open/Closed state is decided by the handler and is reported with the `CustomProtocolOpen`
+/// and `CustomProtocolClosed` events. The `CustomMessage` event can only be generated if the
+/// handler is open.
 ///
 /// ## How it works
 ///
@@ -94,15 +119,17 @@ where
 	type Handler = CustomProtoHandler<TMessage, TSubstream>;
 
 	fn into_handler(self, remote_peer_id: &PeerId) -> Self::Handler {
+		let clock = Clock::new();
 		CustomProtoHandler {
 			protocol: self.protocol,
 			remote_peer_id: remote_peer_id.clone(),
 			state: ProtocolState::Init {
 				substreams: SmallVec::new(),
-				init_deadline: Delay::new(Instant::now() + Duration::from_secs(5))
+				init_deadline: Delay::new(clock.now() + Duration::from_secs(5))
 			},
 			events_queue: SmallVec::new(),
-			warm_up_end: Instant::now() + Duration::from_secs(5),
+			warm_up_end: clock.now() + Duration::from_secs(5),
+			clock,
 		}
 	}
 }
@@ -128,6 +155,10 @@ pub struct CustomProtoHandler<TMessage, TSubstream> {
 	/// We have a warm-up period after creating the handler during which we don't shut down the
 	/// connection.
 	warm_up_end: Instant,
+
+	/// `Clock` instance that uses the current execution context's source of time.
+	clock: Clock,
+
 }
 
 /// State of the handler.
@@ -379,7 +410,7 @@ where
 						});
 					}
 					ProtocolState::Opening {
-						deadline: Delay::new(Instant::now() + Duration::from_secs(60))
+						deadline: Delay::new(self.clock.now() + Duration::from_secs(60))
 					}
 
 				} else if incoming.iter().any(|s| s.is_multiplex()) {
@@ -489,7 +520,7 @@ where
 			ProtocolState::Init { substreams, mut init_deadline } => {
 				match init_deadline.poll() {
 					Ok(Async::Ready(())) => {
-						init_deadline.reset(Instant::now() + Duration::from_secs(60));
+						init_deadline.reset(self.clock.now() + Duration::from_secs(60));
 						error!(target: "sub-libp2p", "Handler initialization process is too long \
 							with {:?}", self.remote_peer_id)
 					},
@@ -504,9 +535,9 @@ where
 			ProtocolState::Opening { mut deadline } => {
 				match deadline.poll() {
 					Ok(Async::Ready(())) => {
-						deadline.reset(Instant::now() + Duration::from_secs(60));
+						deadline.reset(self.clock.now() + Duration::from_secs(60));
 						let event = CustomProtoHandlerOut::ProtocolError {
-							is_severe: false,
+							is_severe: true,
 							error: "Timeout when opening protocol".to_string().into(),
 						};
 						return_value = Some(ProtocolsHandlerEvent::Custom(event));
@@ -518,7 +549,7 @@ where
 					},
 					Err(_) => {
 						error!(target: "sub-libp2p", "Tokio timer has errored");
-						deadline.reset(Instant::now() + Duration::from_secs(60));
+						deadline.reset(self.clock.now() + Duration::from_secs(60));
 						return_value = None;
 						ProtocolState::Opening { deadline }
 					},
@@ -552,7 +583,7 @@ where
 						return_value = Some(ProtocolsHandlerEvent::Custom(event));
 						ProtocolState::Disabled {
 							shutdown: shutdown.into_iter().collect(),
-							reenable: false
+							reenable: true
 						}
 					}
 					Err(err) => {
@@ -562,7 +593,7 @@ where
 						return_value = Some(ProtocolsHandlerEvent::Custom(event));
 						ProtocolState::Disabled {
 							shutdown: shutdown.into_iter().collect(),
-							reenable: false
+							reenable: true
 						}
 					}
 				}
@@ -588,7 +619,7 @@ where
 						info: (),
 					});
 					ProtocolState::Opening {
-						deadline: Delay::new(Instant::now() + Duration::from_secs(60))
+						deadline: Delay::new(self.clock.now() + Duration::from_secs(60))
 					}
 				} else {
 					return_value = None;
@@ -804,7 +835,7 @@ where TSubstream: AsyncRead + AsyncWrite, TMessage: CustomMessage {
 	}
 
 	fn connection_keep_alive(&self) -> KeepAlive {
-		if self.warm_up_end >= Instant::now() {
+		if self.warm_up_end >= self.clock.now() {
 			return KeepAlive::Until(self.warm_up_end)
 		}
 

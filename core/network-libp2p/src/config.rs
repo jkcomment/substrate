@@ -48,6 +48,9 @@ pub struct NetworkConfiguration {
 	pub client_version: String,
 	/// Name of the node. Sent over the wire for debugging purposes.
 	pub node_name: String,
+	/// If true, the network will use mDNS to discover other libp2p nodes on the local network
+	/// and connect to them if they support the same chain.
+	pub enable_mdns: bool,
 }
 
 impl Default for NetworkConfiguration {
@@ -58,13 +61,14 @@ impl Default for NetworkConfiguration {
 			listen_addresses: Vec::new(),
 			public_addresses: Vec::new(),
 			boot_nodes: Vec::new(),
-			node_key: NodeKeyConfig::Secp256k1(Secret::New),
+			node_key: NodeKeyConfig::Ed25519(Secret::New),
 			in_peers: 25,
 			out_peers: 75,
 			reserved_nodes: Vec::new(),
 			non_reserved_mode: NonReservedPeerMode::Accept,
 			client_version: "unknown".into(),
 			node_name: "unknown".into(),
+			enable_mdns: false,
 		}
 	}
 }

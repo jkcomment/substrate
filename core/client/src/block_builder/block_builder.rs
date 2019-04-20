@@ -51,11 +51,11 @@ where
 	/// build upon.
 	pub fn at_block(block_id: &BlockId<Block>, api: &'a A) -> error::Result<Self> {
 		let number = api.block_number_from_id(block_id)?
-			.ok_or_else(|| error::ErrorKind::UnknownBlock(format!("{}", block_id)))?
+			.ok_or_else(|| error::Error::UnknownBlock(format!("{}", block_id)))?
 			+ One::one();
 
 		let parent_hash = api.block_hash_from_id(block_id)?
-			.ok_or_else(|| error::ErrorKind::UnknownBlock(format!("{}", block_id)))?;
+			.ok_or_else(|| error::Error::UnknownBlock(format!("{}", block_id)))?;
 		let header = <<Block as BlockT>::Header as HeaderT>::new(
 			number,
 			Default::default(),
@@ -64,7 +64,7 @@ where
 			Default::default()
 		);
 		let api = api.runtime_api();
-		api.initialise_block_with_context(block_id, ExecutionContext::BlockConstruction, &header)?;
+		api.initialize_block_with_context(block_id, ExecutionContext::BlockConstruction, &header)?;
 		Ok(BlockBuilder {
 			header,
 			extrinsics: Vec::new(),
@@ -89,7 +89,7 @@ where
 					Ok(())
 				}
 				Err(e) => {
-					Err(error::ErrorKind::ApplyExtrinsicFailed(e).into())
+					Err(error::Error::ApplyExtrinsicFailed(e))
 				}
 			}
 		})
@@ -97,7 +97,7 @@ where
 
 	/// Consume the builder to return a valid `Block` containing all pushed extrinsics.
 	pub fn bake(mut self) -> error::Result<Block> {
-		self.header = self.api.finalise_block_with_context(&self.block_id, ExecutionContext::BlockConstruction)?;
+		self.header = self.api.finalize_block_with_context(&self.block_id, ExecutionContext::BlockConstruction)?;
 
 		debug_assert_eq!(
 			self.header.extrinsics_root().clone(),

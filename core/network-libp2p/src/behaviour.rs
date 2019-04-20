@@ -20,13 +20,15 @@ use libp2p::NetworkBehaviour;
 use libp2p::core::{Multiaddr, PeerId, ProtocolsHandler, PublicKey};
 use libp2p::core::swarm::{ConnectedPoint, NetworkBehaviour, NetworkBehaviourAction};
 use libp2p::core::swarm::{NetworkBehaviourEventProcess, PollParameters};
+use libp2p::core::swarm::toggle::Toggle;
 use libp2p::identify::{Identify, IdentifyEvent, protocol::IdentifyInfo};
 use libp2p::kad::{Kademlia, KademliaOut};
+use libp2p::mdns::{Mdns, MdnsEvent};
 use libp2p::ping::{Ping, PingEvent};
 use log::{debug, trace, warn};
-use std::{cmp, io, fmt, time::Duration, time::Instant};
+use std::{cmp, io, fmt, time::Duration};
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_timer::Delay;
+use tokio_timer::{Delay, clock::Clock};
 use void;
 
 /// General behaviour of the network.
@@ -41,6 +43,8 @@ pub struct Behaviour<TMessage, TSubstream> {
 	discovery: DiscoveryBehaviour<TSubstream>,
 	/// Periodically identifies the remote and responds to incoming requests.
 	identify: Identify<TSubstream>,
+	/// Discovers nodes on the local network.
+	mdns: Toggle<Mdns<TSubstream>>,
 
 	/// Queue of events to produce for the outside.
 	#[behaviour(ignore)]
@@ -54,7 +58,8 @@ impl<TMessage, TSubstream> Behaviour<TMessage, TSubstream> {
 		local_public_key: PublicKey,
 		protocol: RegisteredProtocol<TMessage>,
 		known_addresses: Vec<(PeerId, Multiaddr)>,
-		peerset: substrate_peerset::PeersetMut,
+		peerset: substrate_peerset::Peerset,
+		enable_mdns: bool,
 	) -> Self {
 		let identify = {
 			let proto_version = "/substrate/1.0".to_string();
@@ -63,22 +68,34 @@ impl<TMessage, TSubstream> Behaviour<TMessage, TSubstream> {
 
 		let custom_protocols = CustomProto::new(protocol, peerset);
 
-		let mut kademlia = Kademlia::without_init(local_public_key.into_peer_id());
+		let mut kademlia = Kademlia::new(local_public_key.into_peer_id());
 		for (peer_id, addr) in &known_addresses {
 			kademlia.add_connected_address(peer_id, addr.clone());
 		}
-		kademlia.initialize();
 
+		let clock = Clock::new();
 		Behaviour {
 			ping: Ping::new(),
 			custom_protocols,
 			discovery: DiscoveryBehaviour {
 				user_defined: known_addresses,
 				kademlia,
-				next_kad_random_query: Delay::new(Instant::now()),
-				duration_to_next_kad: Duration::from_secs(10),
+				next_kad_random_query: Delay::new(clock.now()),
+				duration_to_next_kad: Duration::from_secs(1),
+				clock,
 			},
 			identify,
+			mdns: if enable_mdns {
+				match Mdns::new() {
+					Ok(mdns) => Some(mdns).into(),
+					Err(err) => {
+						warn!(target: "sub-libp2p", "Failed to initialize mDNS: {:?}", err);
+						None.into()
+					}
+				}
+			} else {
+				None.into()
+			},
 			events: Vec::new(),
 		}
 	}
@@ -128,6 +145,11 @@ impl<TMessage, TSubstream> Behaviour<TMessage, TSubstream> {
 	#[inline]
 	pub fn drop_node(&mut self, peer_id: &PeerId) {
 		self.custom_protocols.disconnect_peer(peer_id)
+	}
+
+	/// Returns the state of the peerset manager, for debugging purposes.
+	pub fn peerset_debug_info(&self) -> serde_json::Value {
+		self.custom_protocols.peerset_debug_info()
 	}
 }
 
@@ -235,7 +257,7 @@ impl<TMessage, TSubstream> NetworkBehaviourEventProcess<IdentifyEvent> for Behav
 				for addr in &info.listen_addrs {
 					self.discovery.kademlia.add_connected_address(&peer_id, addr.clone());
 				}
-				self.custom_protocols.add_discovered_node(&peer_id);
+				self.custom_protocols.add_discovered_nodes(Some(peer_id.clone()));
 				self.events.push(BehaviourOut::Identified { peer_id, info });
 			}
 			IdentifyEvent::Error { .. } => {}
@@ -252,7 +274,7 @@ impl<TMessage, TSubstream> NetworkBehaviourEventProcess<KademliaOut> for Behavio
 		match out {
 			KademliaOut::Discovered { .. } => {}
 			KademliaOut::KBucketAdded { peer_id, .. } => {
-				self.custom_protocols.add_discovered_node(&peer_id);
+				self.custom_protocols.add_discovered_nodes(Some(peer_id));
 			}
 			KademliaOut::FindNodeResult { key, closer_peers } => {
 				trace!(target: "sub-libp2p", "Libp2p => Query for {:?} yielded {:?} results",
@@ -279,6 +301,17 @@ impl<TMessage, TSubstream> NetworkBehaviourEventProcess<PingEvent> for Behaviour
 	}
 }
 
+impl<TMessage, TSubstream> NetworkBehaviourEventProcess<MdnsEvent> for Behaviour<TMessage, TSubstream> {
+	fn inject_event(&mut self, event: MdnsEvent) {
+		match event {
+			MdnsEvent::Discovered(list) => {
+				self.custom_protocols.add_discovered_nodes(list.into_iter().map(|(peer_id, _)| peer_id));
+			},
+			MdnsEvent::Expired(_) => {}
+		}
+	}
+}
+
 impl<TMessage, TSubstream> Behaviour<TMessage, TSubstream> {
 	fn poll<TEv>(&mut self) -> Async<NetworkBehaviourAction<TEv, BehaviourOut<TMessage>>> {
 		if !self.events.is_empty() {
@@ -300,6 +333,8 @@ pub struct DiscoveryBehaviour<TSubstream> {
 	next_kad_random_query: Delay,
 	/// After `next_kad_random_query` triggers, the next one triggers after this duration.
 	duration_to_next_kad: Duration,
+	/// `Clock` instance that uses the current execution context's source of time.
+	clock: Clock,
 }
 
 impl<TSubstream> NetworkBehaviour for DiscoveryBehaviour<TSubstream>
@@ -377,7 +412,7 @@ where
 					self.kademlia.find_node(random_peer_id);
 
 					// Reset the `Delay` to the next random.
-					self.next_kad_random_query.reset(Instant::now() + self.duration_to_next_kad);
+					self.next_kad_random_query.reset(self.clock.now() + self.duration_to_next_kad);
 					self.duration_to_next_kad = cmp::min(self.duration_to_next_kad * 2,
 						Duration::from_secs(60));
 				},

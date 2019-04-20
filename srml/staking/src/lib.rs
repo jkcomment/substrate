@@ -16,203 +16,222 @@
 
 //! # Staking Module
 //!
-//! <!-- Original author of paragraph: @gavofyork -->
-//! The staking module is the means by which a set of network maintainers (known as "authorities" in some contexts and "validators" in others)
-//! are chosen based upon those who voluntarily place funds under deposit. Under deposit, those funds are rewarded under
-//! normal operation but are held at pain of "slash" (expropriation) should the staked maintainer be found not to be
-//! discharging their duties properly.
-//! You can start using the Staking module by implementing the staking [`Trait`].
+//! The Staking module is used to manage funds at stake by network maintainers.
+//!
+//! - [`staking::Trait`](./trait.Trait.html)
+//! - [`Call`](./enum.Call.html)
+//! - [`Module`](./struct.Module.html)
 //!
 //! ## Overview
+//!
+//! The Staking module is the means by which a set of network maintainers (known as _authorities_ in some contexts
+//! and _validators_ in others) are chosen based upon those who voluntarily place funds under deposit. Under deposit,
+//! those funds are rewarded under normal operation but are held at pain of _slash_ (expropriation) should the
+//! staked maintainer be found not to be discharging its duties properly.
 //!
 //! ### Terminology
 //! <!-- Original author of paragraph: @gavofyork -->
 //!
-//! - Staking: The process of locking up funds for some time, placing them at risk of slashing (loss) in order to become a rewarded maintainer of the network.
-//! - Validating: The process of running a node to actively maintain the network, either by producing blocks or guaranteeing finality of the chain.
-//! - Nominating: The process of placing staked funds behind one or more validators in order to share in any reward, and punishment, they take.
+//! - Staking: The process of locking up funds for some time, placing them at risk of slashing (loss)
+//! in order to become a rewarded maintainer of the network.
+//! - Validating: The process of running a node to actively maintain the network, either by producing
+//! blocks or guaranteeing finality of the chain.
+//! - Nominating: The process of placing staked funds behind one or more validators in order to share
+//! in any reward, and punishment, they take.
 //! - Stash account: The account holding an owner's funds used for staking.
-//! - Controller account: The account which controls an owner's funds for staking.
-//! - Era: A (whole) number of sessions, which is the period that the validator set (and each validator's active nominator set) is recalculated and where rewards are paid out.
-//! - Slash: The punishment of a staker by reducing their funds ([reference](#references)).
+//! - Controller account: The account that controls an owner's funds for staking.
+//! - Era: A (whole) number of sessions, which is the period that the validator set (and each validator's
+//! active nominator set) is recalculated and where rewards are paid out.
+//! - Slash: The punishment of a staker by reducing its funds.
 //!
 //! ### Goals
 //! <!-- Original author of paragraph: @gavofyork -->
 //!
-//! The staking system in Substrate NPoS is designed to achieve three goals:
-//! - It should be possible to stake funds that are controlled by a cold wallet.
-//! - It should be possible to withdraw some, or deposit more, funds without interrupting the role of an entity.
-//! - It should be possible to switch between roles (nominator, validator, idle) with minimal overhead.
+//! The staking system in Substrate NPoS is designed to make the following possible:
+//!
+//! - Stake funds that are controlled by a cold wallet.
+//! - Withdraw some, or deposit more, funds without interrupting the role of an entity.
+//! - Switch between roles (nominator, validator, idle) with minimal overhead.
 //!
 //! ### Scenarios
 //!
 //! #### Staking
 //!
-//! Almost any interaction with the staking module requires at least one account to become **bonded**, also known as
-//! being a **staker**. For this, all that it is needed is a secondary _**stash account**_ which will hold the staked funds.
-//! Henceforth, the former account that initiated the interest is called the **controller** and the latter, holding the
-//! funds, is named the **stash**. Also, note that this implies that entering the staking process requires an _account
-//! pair_, one to take the role of the controller and one to be the frozen stash account (any value locked in
-//! stash cannot be used, hence called _frozen_). This process in the public API is mostly referred to as _bonding_ via
-//! the `bond()` function.
+//! Almost any interaction with the Staking module requires a process of _**bonding**_ (also known as
+//! being a _staker_). To become *bonded*, a fund-holding account known as the _stash account_, which holds
+//! some or all of the funds that become frozen in place as part of the staking process, is paired with an
+//! active **controller** account, which issues instructions on how they shall be used.
 //!
-//! Any account pair successfully placed at stake can accept three possible roles, namely: `validate`, `nominate` or
-//! simply `chill`. Note that during the process of accepting these roles, the _controller_ account is always responsible
-//! for declaring interest and the _stash_ account stays untouched, without directly interacting in any operation.
+//! An account pair can become bonded using the [`bond`](./enum.Call.html#variant.bond) call.
+//!
+//! Stash accounts can change their associated controller using the
+//! [`set_controller`](./enum.Call.html#variant.set_controller) call.
+//!
+//! There are three possible roles that any staked account pair can be in: `Validator`, `Nominator` and `Idle`
+//! (defined in [`StakerStatus`](./enum.StakerStatus.html)). There are three corresponding instructions to change between roles, namely:
+//! [`validate`](./enum.Call.html#variant.validate), [`nominate`](./enum.Call.html#variant.nominate),
+//! and [`chill`](./enum.Call.html#variant.chill).
 //!
 //! #### Validating
 //!
 //! A **validator** takes the role of either validating blocks or ensuring their finality, maintaining the veracity of
 //! the network. A validator should avoid both any sort of malicious misbehavior and going offline.
 //! Bonded accounts that state interest in being a validator do NOT get immediately chosen as a validator. Instead, they
-//! are declared as a _candidate_ and they _might_ get elected at the _next **era**_ as a validator. The result of the
-//! election is determined by nominators and their votes. An account can become a validator via the `validate()` call.
+//! are declared as a _candidate_ and they _might_ get elected at the _next era_ as a validator. The result of the
+//! election is determined by nominators and their votes.
+//!
+//! An account can become a validator candidate via the [`validate`](./enum.Call.html#variant.validate) call.
 //!
 //! #### Nomination
 //!
 //! A **nominator** does not take any _direct_ role in maintaining the network, instead, it votes on a set of validators
-//! to be elected. Once interest in nomination is stated by an account, it takes effect _immediately_, meaning that its
-//! votes will be taken into account at the next election round. As mentioned above, a nominator must also place some
-//! funds in a stash account, essentially indicating the _weight_ of its vote. In some sense, the nominator bets on the
-//! honesty of a set of validators by voting for them, with the goal of having a share of the reward granted to them.
-//! Any rewards given to a validator is shared among that validator and all of the nominators that voted for it. The
-//! same logic applies to the slash of a validator; if a validator misbehaves all of its nominators also get slashed.
+//! to be elected. Once interest in nomination is stated by an account, it takes effect at the next election round. The
+//! funds in the nominator's stash account indicate the _weight_ of its vote.
+//! Both the rewards and any punishment that a validator earns are shared between the validator and its nominators.
 //! This rule incentivizes the nominators to NOT vote for the misbehaving/offline validators as much as possible, simply
-//! because the nominators will also lose funds if they vote poorly. An account can become a nominator via the
-//! `nominate()` call.
+//! because the nominators will also lose funds if they vote poorly.
+//!
+//! An account can become a nominator via the [`nominate`](enum.Call.html#variant.nominate) call.
 //!
 //! #### Rewards and Slash
 //!
-//! The **reward and slashing** procedure are the core of the staking module, attempting to _embrace valid behavior_
-//! while _punishing any misbehavior or lack of availability_. Slashing can occur at any point in time, once
-//! misbehavior is reported. One such misbehavior is a validator being detected as offline more than a certain number of
-//! times. Once slashing is determined, a value is deducted from the balance of the validator and all the nominators who
-//! voted for this validator. Same rules apply to the rewards in the sense of being shared among a validator and its
-//! associated nominators.
+//! The **reward and slashing** procedure is the core of the Staking module, attempting to _embrace valid behavior_
+//! while _punishing any misbehavior or lack of availability_.
+//!
+//! Slashing can occur at any point in time, once misbehavior is reported. Once slashing is determined, a value is
+//! deducted from the balance of the validator and all the nominators who voted for this validator
+//! (values are deducted from the _stash_ account of the slashed entity).
+//!
+//! Similar to slashing, rewards are also shared among a validator and its associated nominators.
+//! Yet, the reward funds are not always transferred to the stash account and can be configured.
+//! See [Reward Calculation](#reward-calculation) for more details.
+//!
+//! #### Chilling
 //!
 //! Finally, any of the roles above can choose to step back temporarily and just chill for a while. This means that if
 //! they are a nominator, they will not be considered as voters anymore and if they are validators, they will no longer
-//! be a candidate for the next election (again, both effects apply at the beginning of the next era). An account can
-//! step back via the `chill()` call.
+//! be a candidate for the next election.
+//!
+//! An account can step back via the [`chill`](enum.Call.html#variant.chill) call.
 //!
 //! ## Interface
 //!
-//! ### Types
+//! ### Dispatchable Functions
 //!
-//! - `Currency`: Used as the measurement means of staking and funds management.
-//!
-//! ### Dispatchable
-//!
-//! The Dispatchable functions of the staking module enable the steps needed for entities to accept and change their
+//! The dispatchable functions of the Staking module enable the steps needed for entities to accept and change their
 //! role, alongside some helper functions to get/set the metadata of the module.
 //!
-//! Please refer to the [`Call`] enum and its associated variants for a detailed list of dispatchable functions.
+//! ### Public Functions
 //!
-//! ### Public
-//! The staking module contains many public storage items and (im)mutable functions. Please refer to the [struct list](#structs)
-//!  below and the [`Module`](https://crates.parity.io/srml_staking/struct.Module.html) struct definition for more details.
+//! The Staking module contains many public storage items and (im)mutable functions.
 //!
 //! ## Usage
 //!
+//! ### Example: Reporting Misbehavior
 //!
-//! ### Snippet: Bonding and Accepting Roles
-//!
-//! An arbitrary account pair, given that the associated stash has the required funds, can become stakers via the following call:
-//!
-//! ```rust,ignore
-//! // bond account 3 as stash
-//! // account 4 as controller
-//! // with stash value 1500 units
-//! // while the rewards get transferred to the controller account.
-//! Staking::bond(Origin::signed(3), 4, 1500, RewardDestination::Controller);
 //! ```
+//! use srml_support::{decl_module, dispatch::Result};
+//! use system::ensure_signed;
+//! use srml_staking::{self as staking};
 //!
-//! To state desire to become a validator:
+//! pub trait Trait: staking::Trait {}
 //!
-//! ```rust,ignore
-//! // controller account 4 states desire for validation with the given preferences.
-//! Staking::validate(Origin::signed(4), ValidatorPrefs::default());
-//! ```
-//!
-//! Note that, as mentioned, the stash account is transparent in such calls and only the controller initiates the function calls.
-//!
-//! Similarly, to state desire in nominating:
-//!
-//! ```rust,ignore
-//! // controller account 4 nominates for account 10 and 20.
-//! Staking::nominate(Origin::signed(4), vec![20, 10]);
-//! ```
-//!
-//! Finally, account 4 can withdraw from any of the above roles via
-//!
-//! ```rust,ignore
-//! Staking::chill(Origin::signed(4));
+//! decl_module! {
+//! 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
+//!			/// Report whoever calls this function as offline once.
+//! 		pub fn report_sender(origin) -> Result {
+//! 			let reported = ensure_signed(origin)?;
+//! 			<staking::Module<T>>::on_offline_validator(reported, 1);
+//! 			Ok(())
+//! 		}
+//! 	}
+//! }
+//! # fn main() { }
 //! ```
 //!
 //! ## Implementation Details
 //!
 //! ### Slot Stake
 //!
-//! The term `slot_stake` will be used throughout this section. It refers to a value calculated at the end of each era,
-//! containing the _minimum value at stake among all validators._
+//! The term [`SlotStake`](./struct.Module.html#method.slot_stake) will be used throughout this section. It refers
+//! to a value calculated at the end of each era, containing the _minimum value at stake among all validators._
+//! Note that a validator's value at stake might be a combination of The validator's own stake
+//! and the votes it received. See [`Exposure`](./struct.Exposure.html) for more details.
 //!
 //! ### Reward Calculation
 //!
-//! - Rewards are recorded **per-session** and paid **per-era**. The value of the reward for each session is calculated at
-//!     the end of the session based on the timeliness of the session, then accumulated to be paid later. The value of
-//!     the new _per-session-reward_ is calculated at the end of each era by multiplying `slot_stake` and a configuration
-//!     storage item named `SessionReward`.
-//! - Once a new era is triggered, rewards are paid to the validators and the associated nominators.
-//! - The validator can declare an amount, named `validator_payment`, that does not get shared with the nominators at
-//!     each reward payout through their `ValidatorPrefs`. This value gets deducted from the total reward that can be paid.
-//!     The remaining portion is split among the validator and all of the nominators who had a vote for this validator,
-//!     proportional to their staked value.
-//! - All entities who receive a reward have the option to choose their reward destination, through the `Payee` storage item (see `set_payee()`), to be one of the following:
-//! - Controller account.
+//! Rewards are recorded **per-session** and paid **per-era**. The value of the reward for each session is calculated at
+//! the end of the session based on the timeliness of the session, then accumulated to be paid later. The value of
+//! the new _per-session-reward_ is calculated at the end of each era by multiplying `SlotStake` and `SessionReward`
+//! (`SessionReward` is the multiplication factor, represented by a number between 0 and 1).
+//! Once a new era is triggered, rewards are paid to the validators and their associated nominators.
+//!
+//! The validator can declare an amount, named
+//! [`validator_payment`](./struct.ValidatorPrefs.html#structfield.validator_payment), that does not get shared
+//! with the nominators at each reward payout through its [`ValidatorPrefs`](./struct.ValidatorPrefs.html). This value
+//! gets deducted from the total reward that can be paid. The remaining portion is split among the validator and all
+//! of the nominators that nominated the validator, proportional to the value staked behind this validator (_i.e._
+//! dividing the [`own`](./struct.Exposure.html#structfield.own) or [`others`](./struct.Exposure.html#structfield.others)
+//! by [`total`](./struct.Exposure.html#structfield.total) in [`Exposure`](./struct.Exposure.html)).
+//!
+//! All entities who receive a reward have the option to choose their reward destination
+//! through the [`Payee`](./struct.Payee.html) storage item (see [`set_payee`](enum.Call.html#variant.set_payee)),
+//! to be one of the following:
+//!
+//! - Controller account, (obviously) not increasing the staked value.
 //! - Stash account, not increasing the staked value.
 //! - Stash account, also increasing the staked value.
 //!
 //! ### Slashing details
 //!
-//! - A validator can be _reported_ to be offline at any point via `on_offline_validator` public function.
-//! - Each validator declares how many times it can be _reported_ before it actually gets slashed via the
-//!     `unstake_threshold` in `ValidatorPrefs`. On top of this, the module also introduces an `OfflineSlashGrace`,
-//!      which applies to all validators and prevents them from getting immediately slashed.
-//! - Similar to the reward value, the slash value is updated at the end of each era by multiplying `slot_stake` and a
-//!     configuration storage item, `OfflineSlash`.
-//! - Once a validator has been reported a sufficient number of times, the actual value that gets deducted from that
-//!     validator, and every single nominator that voted for it is calculated by multiplying the result of the above point
-//!       by `2.pow(unstake_threshold)`.
-//! - If the previous overflows, then `slot_stake` is used.
-//! - If the previous is more than what the validator/nominator has in stake, all of its stake is slashed (`.max(total_stake)`).
+//! A validator can be _reported_ to be offline at any point via the public function
+//! [`on_offline_validator`](enum.Call.html#variant.on_offline_validator). Each validator declares how many times it
+//! can be _reported_ before it actually gets slashed via its
+//! [`unstake_threshold`](./struct.ValidatorPrefs.html#structfield.unstake_threshold).
+//!
+//! On top of this, the Staking module also introduces an
+//! [`OfflineSlashGrace`](./struct.Module.html#method.offline_slash_grace), which applies
+//! to all validators and prevents them from getting immediately slashed.
+//!
+//! Essentially, a validator gets slashed once they have been reported more than
+//! [`OfflineSlashGrace`] + [`unstake_threshold`] times. Getting slashed due to offline report always leads
+//! to being _unstaked_ (_i.e._ removed as a validator candidate) as the consequence.
+//!
+//! The base slash value is computed _per slash-event_ by multiplying
+//! [`OfflineSlash`](./struct.Module.html#method.offline_slash) and the `total` `Exposure`. This value is then
+//! multiplied by `2.pow(unstake_threshold)` to obtain the final slash value. All individual accounts' punishments are
+//! capped at their total stake (NOTE: This cap should never come into force in a correctly implemented,
+//! non-corrupted, well-configured system).
 //!
 //! ### Additional Fund Management Operations
 //!
 //! Any funds already placed into stash can be the target of the following operations:
 //!
-//! - The controller account can free a portion (or all) of the funds using the `unbond()` call. Note that the funds
-//!     are not immediately accessible, instead, a duration denoted by `BondingDuration` (in number of eras) must pass until the funds can actually be removed.
-//! - To actually remove the funds, once the bonding duration is over, `withdraw_unbonded()` can be used.
-//! - As opposed to the above, additional funds can be added to the stash account via the `bond_extra()` transaction call.
+//! The controller account can free a portion (or all) of the funds using the [`unbond`](enum.Call.html#variant.unbond)
+//! call. Note that the funds are not immediately accessible. Instead, a duration denoted by
+//! [`BondingDuration`](./struct.BondingDuration.html) (in number of eras) must pass until the funds can actually be
+//! removed. Once the `BondingDuration` is over, the [`withdraw_unbonded`](./enum.Call.html#variant.withdraw_unbonded) call can be used
+//! to actually withdraw the funds.
 //!
-//! ### Election algorithm details.
+//! ### Election Algorithm
 //!
-//! The current election algorithm is implemented based on Phragmén. The reference implementation can be found [here](https://github.com/w3f/consensus/tree/master/NPoS).
+//! The current election algorithm is implemented based on Phragmén.
+//! The reference implementation can be found [here](https://github.com/w3f/consensus/tree/master/NPoS).
+//!
+//! The election algorithm, aside from electing the validators with the most stake value and votes, tries to divide
+//! the nominator votes among candidates in an equal manner. To further assure this, an optional post-processing
+//! can be applied that iteractively normalizes the nominator staked values until the total difference among
+//! votes of a particular nominator are less than a threshold.
 //!
 //! ## GenesisConfig
 //!
-//! See the [`GensisConfig`] for a list of attributes that can be provided.
+//! The Staking module depends on the [`GenesisConfig`](./struct.GenesisConfig.html).
 //!
 //! ## Related Modules
 //!
-//! - [**Balances**](https://crates.parity.io/srml_balances/index.html): Used to manage values at stake.
-//! - [**Sessions**](https://crates.parity.io/srml_session/index.html): Used to manage sessions. Also, a list of new validators is also stored in the sessions module's `Validators` at the end of each era.
-//! - [**System**](https://crates.parity.io/srml_system/index.html): Used to obtain block number and time, among other details.
-//!
-//! # References
-//!
-//! 1. This document is written as a more verbose version of the original [Staking.md](../Staking.md) file. Some sections, are taken directly from the aforementioned document.
-
+//! - [Balances](../srml_balances/index.html): Used to manage values at stake.
+//! - [Session](../srml_session/index.html): Used to manage sessions. Also, a list of new validators is
+//! stored in the Session module's `Validators` at the end of each era.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -224,11 +243,11 @@ use srml_support::{StorageValue, StorageMap, EnumerableStorageMap, dispatch::Res
 use srml_support::{decl_module, decl_event, decl_storage, ensure};
 use srml_support::traits::{
 	Currency, OnFreeBalanceZero, OnDilution, LockIdentifier, LockableCurrency, WithdrawReasons,
-	OnUnbalanced, Imbalance
+	OnUnbalanced, Imbalance,
 };
 use session::OnSessionChange;
 use primitives::Perbill;
-use primitives::traits::{Zero, One, As, StaticLookup, CheckedSub, Saturating, Bounded};
+use primitives::traits::{Convert, Zero, One, As, StaticLookup, CheckedSub, Saturating, Bounded};
 #[cfg(feature = "std")]
 use primitives::{Serialize, Deserialize};
 use system::ensure_signed;
@@ -249,7 +268,7 @@ const MAX_UNSTAKE_THRESHOLD: u32 = 10;
 pub enum StakerStatus<AccountId> {
 	/// Chilling.
 	Idle,
-	/// Declared state in validating or already participating in it.
+	/// Declared desire in validating or already participating in it.
 	Validator,
 	/// Nominating for a group of other stakers.
 	Nominator(Vec<AccountId>),
@@ -377,9 +396,11 @@ type NegativeImbalanceOf<T> = <<T as Trait>::Currency as Currency<<T as system::
 
 pub trait Trait: system::Trait + session::Trait {
 	/// The staking balance.
-	type Currency:
-		Currency<Self::AccountId> +
-		LockableCurrency<Self::AccountId, Moment=Self::BlockNumber>;
+	type Currency: LockableCurrency<Self::AccountId, Moment=Self::BlockNumber>;
+
+	/// Convert a balance into a number used for election calculation.
+	/// This must fit into a `u64` but is allowed to be sensibly lossy.
+	type CurrencyToVote: Convert<BalanceOf<Self>, u64> + Convert<u128, BalanceOf<Self>>;
 
 	/// Some tokens minted.
 	type OnRewardMinted: OnDilution<BalanceOf<Self>>;
@@ -414,7 +435,7 @@ decl_storage! {
 		/// The length of the bonding duration in blocks.
 		pub BondingDuration get(bonding_duration) config(): T::BlockNumber = T::BlockNumber::sa(1000);
 
-		/// Any validators that may never be slashed or forcibly kicked. It's a Vec since they're easy to initialise
+		/// Any validators that may never be slashed or forcibly kicked. It's a Vec since they're easy to initialize
 		/// and the performance hit is minimal (we expect no more than four invulnerables) and restricted to testnets.
 		pub Invulnerables get(invulnerables) config(): Vec<T::AccountId>;
 
@@ -433,7 +454,7 @@ decl_storage! {
 		pub Nominators get(nominators): linked_map T::AccountId => Vec<T::AccountId>;
 
 		/// Nominators for a particular account that is in action right now. You can't iterate through validators here,
-		/// but you can find them in the `sessions` module.
+		/// but you can find them in the Session module.
 		///
 		/// This is keyed by the stash account.
 		pub Stakers get(stakers): map T::AccountId => Exposure<T::AccountId, BalanceOf<T>>;
@@ -477,7 +498,7 @@ decl_storage! {
 		/// We are forcing a new era.
 		pub ForcingNewEra get(forcing_new_era): Option<()>;
 
-		/// Most recent `RECENT_OFFLINE_COUNT` instances. (who it was, when it was reported, how many instances they were offline for).
+		/// Most recent `RECENT_OFFLINE_COUNT` instances. (Who it was, when it was reported, how many instances they were offline for).
 		pub RecentlyOffline get(recently_offline): Vec<(T::AccountId, T::BlockNumber, u32)>;
 	}
 	add_extra_genesis {
@@ -520,7 +541,7 @@ decl_module! {
 		/// Take the origin account as a stash and lock up `value` of its balance. `controller` will be the
 		/// account that controls it.
 		///
-		/// The dispatch origin for this call must be _Signed_.
+		/// The dispatch origin for this call must be _Signed_ by the stash account.
 		fn bond(origin, controller: <T::Lookup as StaticLookup>::Source, #[compact] value: BalanceOf<T>, payee: RewardDestination) {
 			let stash = ensure_signed(origin)?;
 
@@ -721,21 +742,20 @@ decl_module! {
 	}
 }
 
-// An event in this module.
 decl_event!(
 	pub enum Event<T> where Balance = BalanceOf<T>, <T as system::Trait>::AccountId {
 		/// All validators have been rewarded by the given balance.
 		Reward(Balance),
-		/// One validator (and their nominators) has been given a offline-warning (they're still
-		/// within their grace). The accrued number of slashes is recorded, too.
+		/// One validator (and its nominators) has been given an offline-warning (it is still
+		/// within its grace). The accrued number of slashes is recorded, too.
 		OfflineWarning(AccountId, u32),
-		/// One validator (and their nominators) has been slashed by the given amount.
+		/// One validator (and its nominators) has been slashed by the given amount.
 		OfflineSlash(AccountId, Balance),
 	}
 );
 
 impl<T: Trait> Module<T> {
-	// Just force_new_era without origin check.
+	/// Just force_new_era without origin check.
 	fn apply_force_new_era(apply_rewards: bool) -> Result {
 		<ForcingNewEra<T>>::put(());
 		<session::Module<T>>::apply_force_new_session(apply_rewards)
@@ -762,12 +782,12 @@ impl<T: Trait> Module<T> {
 		<Ledger<T>>::insert(controller, ledger);
 	}
 
-	/// Slash a given validator by a specific amount. Removes the slash from their balance by preference,
+	/// Slash a given validator by a specific amount. Removes the slash from the validator's balance by preference,
 	/// and reduces the nominators' balance if needed.
 	fn slash_validator(stash: &T::AccountId, slash: BalanceOf<T>) {
 		// The exposure (backing stake) information of the validator to be slashed.
 		let exposure = Self::stakers(stash);
-		// The amount we are actually going to slash (can't be bigger than their total exposure)
+		// The amount we are actually going to slash (can't be bigger than the validator's total exposure)
 		let slash = slash.min(exposure.total);
 		// The amount we'll slash from the validator's stash directly.
 		let own_slash = exposure.own.min(slash);
@@ -812,7 +832,7 @@ impl<T: Trait> Module<T> {
 		}
 	}
 
-	/// Reward a given validator by a specific amount. Add the reward to their, and their nominators'
+	/// Reward a given validator by a specific amount. Add the reward to the validator's, and its nominators'
 	/// balance, pro-rata based on their exposure, after having removed the validator's pre-payout cut.
 	fn reward_validator(stash: &T::AccountId, reward: BalanceOf<T>) {
 		let off_the_table = reward.min(Self::validators(stash).validator_payment);
@@ -903,20 +923,16 @@ impl<T: Trait> Module<T> {
 
 	/// Select a new validator set from the assembled stakers and their role preferences.
 	///
-	/// Returns the new SlotStake value.
+	/// Returns the new `SlotStake` value.
 	fn select_validators() -> BalanceOf<T> {
-		let rounds = || <ValidatorCount<T>>::get() as usize;
-		let validators = || <Validators<T>>::enumerate();
-		let nominators = || <Nominators<T>>::enumerate();
-		let min_validator_count = Self::minimum_validator_count() as usize;
-		let maybe_elected_candidates = elect::<T, _, _, _, _>(
-			rounds,
-			validators,
-			nominators,
+		let maybe_elected_candidates = elect::<T, _, _, _>(
+			Self::validator_count() as usize,
+			Self::minimum_validator_count().max(1) as usize,
+			<Validators<T>>::enumerate(),
+			<Nominators<T>>::enumerate(),
 			Self::slashable_balance_of,
-			min_validator_count,
 			ElectionConfig::<BalanceOf<T>> {
-				equalise: false,
+				equalize: false,
 				tolerance: <BalanceOf<T>>::sa(10 as u64),
 				iterations: 10,
 			}
@@ -961,7 +977,7 @@ impl<T: Trait> Module<T> {
 	}
 
 	/// Call when a validator is determined to be offline. `count` is the
-	/// number of offences the validator has committed.
+	/// number of offenses the validator has committed.
 	///
 	/// NOTE: This is called with the controller (not the stash) account id.
 	pub fn on_offline_validator(controller: T::AccountId, count: usize) {

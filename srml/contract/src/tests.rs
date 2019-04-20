@@ -34,11 +34,12 @@ use assert_matches::assert_matches;
 use crate::{
 	ContractAddressFor, GenesisConfig, Module, RawEvent,
 	Trait, ComputeDispatchFee, TrieIdGenerator, TrieId,
-	AccountInfo, AccountInfoOf,
+	AccountInfo, AccountInfoOf, TrieIdFromParentCounter
 };
 use substrate_primitives::storage::well_known_keys;
 use parity_codec::{Encode, Decode, KeyedVec};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::account_db::{DirectAccountDb, OverlayAccountDb, AccountDb};
 
 mod contract {
 	// Re-export contents of the root. This basically
@@ -96,6 +97,7 @@ impl consensus::Trait for Test {
 	type InherentOfflineReport = ();
 }
 impl Trait for Test {
+	type Currency = Balances;
 	type Call = Call;
 	type Gas = u64;
 	type DetermineContractAddress = DummyContractAddressFor;
@@ -198,6 +200,10 @@ impl ExtBuilder {
 		);
 		t.extend(
 			GenesisConfig::<Test> {
+				transaction_base_fee: 0,
+				transaction_byte_fee: 0,
+				transfer_fee: self.transfer_fee,
+				creation_fee: self.creation_fee,
 				contract_fee: 21,
 				call_base_fee: 135,
 				create_base_fee: 175,
@@ -233,33 +239,41 @@ fn refunds_unused_gas() {
 
 #[test]
 fn account_removal_removes_storage() {
-	let unique_id1 = b"unique_id1";
-	let unique_id2 = b"unique_id2";
 	with_externalities(
 		&mut ExtBuilder::default().existential_deposit(100).build(),
 		|| {
-			// Setup two accounts with free balance above than exsistential threshold.
+			let trie_id1 = <Test as Trait>::TrieIdGenerator::trie_id(&1);
+			let trie_id2 = <Test as Trait>::TrieIdGenerator::trie_id(&2);
+			let key1 = &[1; 32];
+			let key2 = &[2; 32];
+
+			// Set up two accounts with free balance above the existential threshold.
 			{
 				Balances::deposit_creating(&1, 110);
 				AccountInfoOf::<Test>::insert(1, &AccountInfo {
-					trie_id: unique_id1.to_vec(),
-					current_mem_stored: 0,
+					trie_id: trie_id1.clone(),
+					storage_size: 0,
 				});
-				child::put(&unique_id1[..], &b"foo".to_vec(), &b"1".to_vec());
-				assert_eq!(child::get(&unique_id1[..], &b"foo".to_vec()), Some(b"1".to_vec()));
-				child::put(&unique_id1[..], &b"bar".to_vec(), &b"2".to_vec());
+
+				let mut overlay = OverlayAccountDb::<Test>::new(&DirectAccountDb);
+				overlay.set_storage(&1, key1.clone(), Some(b"1".to_vec()));
+				overlay.set_storage(&1, key2.clone(), Some(b"2".to_vec()));
+				DirectAccountDb.commit(overlay.into_change_set());
 
 				Balances::deposit_creating(&2, 110);
 				AccountInfoOf::<Test>::insert(2, &AccountInfo {
-					trie_id: unique_id2.to_vec(),
-					current_mem_stored: 0,
+					trie_id: trie_id2.clone(),
+					storage_size: 0,
 				});
-				child::put(&unique_id2[..], &b"hello".to_vec(), &b"3".to_vec());
-				child::put(&unique_id2[..], &b"world".to_vec(), &b"4".to_vec());
+
+				let mut overlay = OverlayAccountDb::<Test>::new(&DirectAccountDb);
+				overlay.set_storage(&2, key1.clone(), Some(b"3".to_vec()));
+				overlay.set_storage(&2, key2.clone(), Some(b"4".to_vec()));
+				DirectAccountDb.commit(overlay.into_change_set());
 			}
 
 			// Transfer funds from account 1 of such amount that after this transfer
-			// the balance of account 1 is will be below than exsistential threshold.
+			// the balance of account 1 will be below the existential threshold.
 			//
 			// This should lead to the removal of all storage associated with this account.
 			assert_ok!(Balances::transfer(Origin::signed(1), 2, 20));
@@ -267,15 +281,16 @@ fn account_removal_removes_storage() {
 			// Verify that all entries from account 1 is removed, while
 			// entries from account 2 is in place.
 			{
-				assert_eq!(child::get_raw(&unique_id1[..], &b"foo".to_vec()), None);
-				assert_eq!(child::get_raw(&unique_id1[..], &b"bar".to_vec()), None);
+				// let a: <Test as system::Trait>::AccountId = 1;
+				assert!(<AccountDb<Test>>::get_storage(&DirectAccountDb, &1, Some(&trie_id1), key1).is_none());
+				assert!(<AccountDb<Test>>::get_storage(&DirectAccountDb, &1, Some(&trie_id1), key2).is_none());
 
 				assert_eq!(
-					child::get(&unique_id2[..], &b"hello".to_vec()),
+					<AccountDb<Test>>::get_storage(&DirectAccountDb, &2, Some(&trie_id2), key1),
 					Some(b"3".to_vec())
 				);
 				assert_eq!(
-					child::get(&unique_id2[..], &b"world".to_vec()),
+					<AccountDb<Test>>::get_storage(&DirectAccountDb, &2, Some(&trie_id2), key2),
 					Some(b"4".to_vec())
 				);
 			}
@@ -286,10 +301,15 @@ fn account_removal_removes_storage() {
 const CODE_RETURN_FROM_START_FN: &str = r#"
 (module
 	(import "env" "ext_return" (func $ext_return (param i32 i32)))
+	(import "env" "ext_deposit_event" (func $ext_deposit_event (param i32 i32)))
 	(import "env" "memory" (memory 1 1))
 
 	(start $start)
 	(func $start
+		(call $ext_deposit_event
+			(i32.const 8)
+			(i32.const 4)
+		)
 		(call $ext_return
 			(i32.const 8)
 			(i32.const 4)
@@ -305,10 +325,10 @@ const CODE_RETURN_FROM_START_FN: &str = r#"
 	(data (i32.const 8) "\01\02\03\04")
 )
 "#;
-const HASH_RETURN_FROM_START_FN: [u8; 32] = hex!("e6411d12daa2a19e4e9c7d8306c31c7d53a352cb8ed84385c8a1d48fc232e708");
+const HASH_RETURN_FROM_START_FN: [u8; 32] = hex!("abb4194bdea47b2904fe90b4fd674bd40d96f423956627df8c39d2b1a791ab9d");
 
 #[test]
-fn instantiate_and_call() {
+fn instantiate_and_call_and_deposit_event() {
 	let wasm = wabt::wat2wasm(CODE_RETURN_FROM_START_FN).unwrap();
 
 	with_externalities(
@@ -322,13 +342,14 @@ fn instantiate_and_call() {
 				wasm,
 			));
 
-			assert_ok!(Contract::create(
+			// Check at the end to get hash on error easily
+			let creation = Contract::create(
 				Origin::signed(ALICE),
 				100,
 				100_000,
 				HASH_RETURN_FROM_START_FN.into(),
 				vec![],
-			));
+			);
 
 			assert_eq!(System::events(), vec![
 				EventRecord {
@@ -351,9 +372,16 @@ fn instantiate_and_call() {
 				},
 				EventRecord {
 					phase: Phase::ApplyExtrinsic(0),
+					event: MetaEvent::contract(RawEvent::Contract(BOB, vec![1, 2, 3, 4]))
+				},
+				EventRecord {
+					phase: Phase::ApplyExtrinsic(0),
 					event: MetaEvent::contract(RawEvent::Instantiated(ALICE, BOB))
 				}
 			]);
+
+			assert_ok!(creation);
+			assert!(AccountInfoOf::<Test>::exists(BOB));
 		},
 	);
 }
