@@ -127,7 +127,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "std")]
-use serde_derive::Serialize;
+use serde::Serialize;
 use rstd::prelude::*;
 use parity_codec as codec;
 use codec::{Encode, Decode};
@@ -142,7 +142,7 @@ use inherents::{
 };
 
 #[cfg(any(feature = "std", test))]
-use substrate_primitives::ed25519::Public as AuthorityId;
+use substrate_primitives::sr25519::Public as AuthorityId;
 
 mod mock;
 mod tests;

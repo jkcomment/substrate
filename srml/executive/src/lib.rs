@@ -365,7 +365,7 @@ mod tests {
 	use primitives::testing::{Digest, DigestItem, Header, Block};
 	use srml_support::{traits::Currency, impl_outer_origin, impl_outer_event};
 	use system;
-	use hex_literal::{hex, hex_impl};
+	use hex_literal::hex;
 
 	impl_outer_origin! {
 		pub enum Origin for Runtime {
@@ -443,7 +443,7 @@ mod tests {
 				header: Header {
 					parent_hash: [69u8; 32].into(),
 					number: 1,
-					state_root: hex!("49cd58a254ccf6abc4a023d9a22dcfc421e385527a250faec69f8ad0d8ed3e48").into(),
+					state_root: hex!("ac2840371d51ff2e036c8fc05af7313b7a030f735c38b2f03b94cbe87bfbb7c9").into(),
 					extrinsics_root: hex!("03170a2e7597b7b7e3d84c05391d139a62b157e78786d8c082f29dcf4c111314").into(),
 					digest: Digest { logs: vec![], },
 				},

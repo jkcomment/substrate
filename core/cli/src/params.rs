@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use structopt::{StructOpt, clap::{arg_enum, _clap_count_exprs, App, AppSettings, SubCommand, Arg}};
 use client;
 
-/// Auxialary macro to implement `GetLogFilter` for all types that have the `shared_params` field.
+/// Auxiliary macro to implement `GetLogFilter` for all types that have the `shared_params` field.
 macro_rules! impl_get_log_filter {
 	( $type:ident ) => {
 		impl $crate::GetLogFilter for $type {
@@ -119,7 +119,7 @@ pub struct NetworkConfigurationParams {
 	pub in_peers: u32,
 
 	/// By default, the network will use mDNS to discover other nodes on the local network. This
-	/// disables it.
+	/// disables it. Automatically implied when using --dev.
 	#[structopt(long = "no-mdns")]
 	pub no_mdns: bool,
 
@@ -312,6 +312,10 @@ pub struct RunCmd {
 	/// Limit the memory the database cache can use
 	#[structopt(long = "db-cache", value_name = "MiB")]
 	pub database_cache_size: Option<u32>,
+
+	/// Specify the state cache size
+	#[structopt(long = "state-cache-size", value_name = "Bytes", default_value = "67108864")]
+	pub state_cache_size: usize,
 
 	/// Listen to all RPC interfaces (default is local)
 	#[structopt(long = "rpc-external")]
@@ -560,7 +564,7 @@ pub struct ImportBlocksCmd {
 
 impl_get_log_filter!(ImportBlocksCmd);
 
-/// The `revert` command used revert the chain to a previos state.
+/// The `revert` command used revert the chain to a previous state.
 #[derive(Debug, StructOpt, Clone)]
 pub struct RevertCmd {
 	/// Number of blocks to revert.

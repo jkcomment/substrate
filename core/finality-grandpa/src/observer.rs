@@ -25,9 +25,8 @@ use grandpa::{
 use log::{debug, info, warn};
 
 use client::{CallExecutor, Client, backend::Backend};
-use ed25519::Public as AuthorityId;
-use runtime_primitives::traits::{NumberFor, Block as BlockT, DigestItemFor, DigestItem};
-use substrate_primitives::{ed25519, H256, Blake2Hasher};
+use runtime_primitives::traits::{NumberFor, Block as BlockT};
+use substrate_primitives::{ed25519::Public as AuthorityId, H256, Blake2Hasher};
 
 use crate::{
 	AuthoritySignature, global_communication, CommandOrError, Config, environment,
@@ -90,9 +89,9 @@ fn grandpa_observer<B, E, Block: BlockT<Hash=H256>, RA, S>(
 			},
 		};
 
-		// if the commit we've received targets a block lower than the last
+		// if the commit we've received targets a block lower or equal to the last
 		// finalized, ignore it and continue with the current state
-		if commit.target_number < last_finalized_number {
+		if commit.target_number <= last_finalized_number {
 			return future::ok(last_finalized_number);
 		}
 
@@ -155,7 +154,6 @@ pub fn run_grandpa_observer<B, E, Block: BlockT<Hash=H256>, N, RA>(
 	N: Network<Block> + Send + Sync + 'static,
 	N::In: Send + 'static,
 	NumberFor<Block>: BlockNumberOps,
-	DigestItemFor<Block>: DigestItem<AuthorityId=AuthorityId>,
 	RA: Send + Sync + 'static,
 {
 	let LinkHalf {

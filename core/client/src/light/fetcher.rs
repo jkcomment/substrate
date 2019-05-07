@@ -22,7 +22,6 @@ use std::marker::PhantomData;
 use futures::IntoFuture;
 
 use hash_db::{HashDB, Hasher};
-use heapsize::HeapSizeOf;
 use primitives::{ChangesTrieConfiguration, convert_hash};
 use runtime_primitives::traits::{As, Block as BlockT, Header as HeaderT, NumberFor};
 use state_machine::{CodeExecutor, ChangesTrieRootsStorage, ChangesTrieAnchorBlockId,
@@ -188,7 +187,7 @@ impl<E, H, B: BlockT, S: BlockchainStorage<B>, F> LightDataChecker<E, H, B, S, F
 	) -> ClientResult<Vec<(NumberFor<B>, u32)>>
 		where
 			H: Hasher,
-			H::Out: Ord + HeapSizeOf,
+			H::Out: Ord,
 	{
 		// since we need roots of all changes tries for the range begin..max
 		// => remote node can't use max block greater that one that we have passed
@@ -259,7 +258,7 @@ impl<E, H, B: BlockT, S: BlockchainStorage<B>, F> LightDataChecker<E, H, B, S, F
 	) -> ClientResult<()>
 		where
 			H: Hasher,
-			H::Out: Ord + HeapSizeOf,
+			H::Out: Ord,
 	{
 		// all the checks are sharing the same storage
 		let storage = create_proof_check_backend_storage(remote_roots_proof);
@@ -309,7 +308,7 @@ impl<E, Block, H, S, F> FetchChecker<Block> for LightDataChecker<E, H, Block, S,
 		Block: BlockT,
 		E: CodeExecutor<H>,
 		H: Hasher,
-		H::Out: Ord + HeapSizeOf,
+		H::Out: Ord,
 		S: BlockchainStorage<Block>,
 		F: Send + Sync,
 {
@@ -404,7 +403,7 @@ pub mod tests {
 	use crate::light::fetcher::{Fetcher, FetchChecker, LightDataChecker,
 		RemoteCallRequest, RemoteHeaderRequest};
 	use crate::light::blockchain::tests::{DummyStorage, DummyBlockchain};
-	use primitives::{twox_128, Blake2Hasher};
+	use primitives::{blake2_256, Blake2Hasher};
 	use primitives::storage::{StorageKey, well_known_keys};
 	use runtime_primitives::generic::BlockId;
 	use state_machine::Backend;
@@ -587,7 +586,7 @@ pub mod tests {
 		// we're testing this test case here:
 		// (1, 4, dave.clone(), vec![(4, 0), (1, 1), (1, 0)]),
 		let (remote_client, remote_roots, _) = prepare_client_with_key_changes();
-		let dave = twox_128(&runtime::system::balance_of_key(AccountKeyring::Dave.into())).to_vec();
+		let dave = blake2_256(&runtime::system::balance_of_key(AccountKeyring::Dave.into())).to_vec();
 		let dave = StorageKey(dave);
 
 		// 'fetch' changes proof from remote node:
@@ -699,7 +698,7 @@ pub mod tests {
 		let (remote_client, remote_roots, _) = prepare_client_with_key_changes();
 		let local_cht_root = cht::compute_root::<Header, Blake2Hasher, _>(
 			4, 0, remote_roots.iter().cloned().map(|ct| Ok(Some(ct)))).unwrap();
-		let dave = twox_128(&runtime::system::balance_of_key(AccountKeyring::Dave.into())).to_vec();
+		let dave = blake2_256(&runtime::system::balance_of_key(AccountKeyring::Dave.into())).to_vec();
 		let dave = StorageKey(dave);
 
 		// 'fetch' changes proof from remote node:
