@@ -14,48 +14,38 @@
 // You should have received a copy of the GNU General Public License
 // along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::{io, thread};
+//! Main entry point of the substrate-network crate.
+//!
+//! There are two main structs in this module: [`NetworkWorker`] and [`NetworkService`].
+//! The [`NetworkWorker`] *is* the network and implements the `Future` trait. It must be polled in
+//! order fo the network to advance.
+//! The [`NetworkService`] is merely a shared version of the [`NetworkWorker`]. You can obtain an
+//! `Arc<NetworkService>` by calling [`NetworkWorker::service`].
+//!
+//! The methods of the [`NetworkService`] are implemented by sending a message over a channel,
+//! which is then processed by [`NetworkWorker::poll`].
 
-use log::{warn, debug, error, info};
-use futures::{Async, Future, Stream, sync::oneshot, sync::mpsc};
-use parking_lot::{Mutex, RwLock};
-use network_libp2p::{ProtocolId, NetworkConfiguration};
-use network_libp2p::{start_service, parse_str_addr, Service as NetworkService, ServiceEvent as NetworkServiceEvent};
-use network_libp2p::{RegisteredProtocol, NetworkState};
+use std::{collections::HashMap, fs, marker::PhantomData, io, path::Path};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+
+use consensus::import_queue::{ImportQueue, Link, SharedFinalityProofRequestBuilder};
+use futures::{prelude::*, sync::mpsc};
+use log::{warn, error, info};
+use libp2p::core::{swarm::NetworkBehaviour, transport::boxed::Boxed, muxing::StreamMuxerBox};
+use libp2p::{PeerId, Multiaddr, multihash::Multihash};
 use peerset::PeersetHandle;
-use consensus::import_queue::{ImportQueue, Link};
 use runtime_primitives::{traits::{Block as BlockT, NumberFor}, ConsensusEngineId};
 
-use crate::consensus_gossip::{ConsensusGossip, MessageRecipient as GossipMessageRecipient};
-use crate::message::Message;
-use crate::protocol::{self, Context, FromNetworkMsg, Protocol, ConnectedPeer, ProtocolMsg, ProtocolStatus, PeerInfo};
-use crate::config::Params;
+use crate::{behaviour::{Behaviour, BehaviourOut}, config::parse_str_addr};
+use crate::{NetworkState, NetworkStateNotConnectedPeer, NetworkStatePeer};
+use crate::{transport, config::NodeKeyConfig, config::NonReservedPeerMode};
+use crate::config::{Params, TransportConfig};
 use crate::error::Error;
-use crate::specialization::NetworkSpecialization;
-
-use crossbeam_channel::{self as channel, Receiver, Sender, TryRecvError};
-use tokio::prelude::task::AtomicTask;
-use tokio::runtime::Builder as RuntimeBuilder;
-
-pub use network_libp2p::PeerId;
-
-/// Type that represents fetch completion future.
-pub type FetchFuture = oneshot::Receiver<Vec<u8>>;
-
-/// Sync status
-pub trait SyncProvider<B: BlockT>: Send + Sync {
-	/// Get a stream of sync statuses.
-	fn status(&self) -> mpsc::UnboundedReceiver<ProtocolStatus<B>>;
-	/// Get network state.
-	fn network_state(&self) -> NetworkState;
-	/// Get currently connected peers
-	fn peers(&self) -> Vec<(PeerId, PeerInfo<B>)>;
-	/// Are we in the process of downloading the chain?
-	fn is_major_syncing(&self) -> bool;
-}
+use crate::protocol::{self, Protocol, Context, CustomMessageOutcome, PeerInfo};
+use crate::protocol::consensus_gossip::{ConsensusGossip, MessageRecipient as GossipMessageRecipient};
+use crate::protocol::{event::Event, on_demand::{AlwaysBadChecker, RequestData}};
+use crate::protocol::specialization::NetworkSpecialization;
+use crate::protocol::sync::SyncState;
 
 /// Minimum Requirements for a Hash within Networking
 pub trait ExHashT:
@@ -77,50 +67,6 @@ pub trait TransactionPool<H: ExHashT, B: BlockT>: Send + Sync {
 	fn on_broadcasted(&self, propagations: HashMap<H, Vec<String>>);
 }
 
-/// A link implementation that connects to the network.
-#[derive(Clone)]
-pub struct NetworkLink<B: BlockT, S: NetworkSpecialization<B>> {
-	/// The protocol sender
-	pub(crate) protocol_sender: Sender<ProtocolMsg<B, S>>,
-	/// The network sender
-	pub(crate) network_sender: NetworkChan<B>,
-}
-
-impl<B: BlockT, S: NetworkSpecialization<B>> Link<B> for NetworkLink<B, S> {
-	fn block_imported(&self, hash: &B::Hash, number: NumberFor<B>) {
-		let _ = self.protocol_sender.send(ProtocolMsg::BlockImportedSync(hash.clone(), number));
-	}
-
-	fn blocks_processed(&self, processed_blocks: Vec<B::Hash>, has_error: bool) {
-		let _ = self.protocol_sender.send(ProtocolMsg::BlocksProcessed(processed_blocks, has_error));
-	}
-
-	fn justification_imported(&self, who: PeerId, hash: &B::Hash, number: NumberFor<B>, success: bool) {
-		let _ = self.protocol_sender.send(ProtocolMsg::JustificationImportResult(hash.clone(), number, success));
-		if !success {
-			info!("Invalid justification provided by {} for #{}", who, hash);
-			let _ = self.network_sender.send(NetworkMsg::ReportPeer(who.clone(), i32::min_value()));
-			let _ = self.network_sender.send(NetworkMsg::DisconnectPeer(who.clone()));
-		}
-	}
-
-	fn clear_justification_requests(&self) {
-		let _ = self.protocol_sender.send(ProtocolMsg::ClearJustificationRequests);
-	}
-
-	fn request_justification(&self, hash: &B::Hash, number: NumberFor<B>) {
-		let _ = self.protocol_sender.send(ProtocolMsg::RequestJustification(hash.clone(), number));
-	}
-
-	fn report_peer(&self, who: PeerId, reputation_change: i32) {
-		self.network_sender.send(NetworkMsg::ReportPeer(who, reputation_change));
-	}
-
-	fn restart(&self) {
-		let _ = self.protocol_sender.send(ProtocolMsg::RestartSync);
-	}
-}
-
 /// A cloneable handle for reporting cost/benefits of peers.
 #[derive(Clone)]
 pub struct ReportHandle {
@@ -136,127 +82,304 @@ impl ReportHandle {
 }
 
 /// Substrate network service. Handles network IO and manages connectivity.
-pub struct Service<B: BlockT + 'static, S: NetworkSpecialization<B>> {
-	/// Sinks to propagate status updates.
-	status_sinks: Arc<Mutex<Vec<mpsc::UnboundedSender<ProtocolStatus<B>>>>>,
-	/// Are we connected to any peer?
-	is_offline: Arc<AtomicBool>,
+pub struct NetworkService<B: BlockT + 'static, S: NetworkSpecialization<B>, H: ExHashT> {
+	/// Number of peers we're connected to.
+	num_connected: Arc<AtomicUsize>,
 	/// Are we actively catching up with the chain?
 	is_major_syncing: Arc<AtomicBool>,
-	/// Peers whom we are connected with.
-	peers: Arc<RwLock<HashMap<PeerId, ConnectedPeer<B>>>>,
-	/// Network service
-	network: Arc<Mutex<NetworkService<Message<B>>>>,
+	/// Local copy of the `PeerId` of the local node.
+	local_peer_id: PeerId,
+	/// Bandwidth logging system. Can be queried to know the average bandwidth consumed.
+	bandwidth: Arc<transport::BandwidthSinks>,
 	/// Peerset manager (PSM); manages the reputation of nodes and indicates the network which
 	/// nodes it should be connected to or not.
 	peerset: PeersetHandle,
-	/// Protocol sender
-	protocol_sender: Sender<ProtocolMsg<B, S>>,
-	/// Sender for messages to the background service task, and handle for the background thread.
-	/// Dropping the sender should close the task and the thread.
-	/// This is an `Option` because we need to extract it in the destructor.
-	bg_thread: Option<(oneshot::Sender<()>, thread::JoinHandle<()>)>,
+	/// Channel that sends messages to the actual worker.
+	to_worker: mpsc::UnboundedSender<ServerToWorkerMsg<B, S>>,
+	/// Marker to pin the `H` generic. Serves no purpose except to not break backwards
+	/// compatibility.
+	_marker: PhantomData<H>,
 }
 
-impl<B: BlockT + 'static, S: NetworkSpecialization<B>> Service<B, S> {
-	/// Creates and register protocol with the network service
-	pub fn new<H: ExHashT>(
+impl<B: BlockT + 'static, S: NetworkSpecialization<B>, H: ExHashT> NetworkWorker<B, S, H> {
+	/// Creates the network service.
+	///
+	/// Returns a `NetworkWorker` that implements `Future` and must be regularly polled in order
+	/// for the network processing to advance. From it, you can extract a `NetworkService` using
+	/// `worker.service()`. The `NetworkService` can be shared through the codebase.
+	pub fn new(
 		params: Params<B, S, H>,
-		protocol_id: ProtocolId,
-		import_queue: Box<ImportQueue<B>>,
-	) -> Result<(Arc<Service<B, S>>, NetworkChan<B>), Error> {
-		let (network_chan, network_port) = network_channel();
-		let status_sinks = Arc::new(Mutex::new(Vec::new()));
-		// Start in off-line mode, since we're not connected to any nodes yet.
-		let is_offline = Arc::new(AtomicBool::new(true));
-		let is_major_syncing = Arc::new(AtomicBool::new(false));
-		let peers: Arc<RwLock<HashMap<PeerId, ConnectedPeer<B>>>> = Arc::new(Default::default());
-		let (protocol_sender, network_to_protocol_sender) = Protocol::new(
-			status_sinks.clone(),
-			is_offline.clone(),
-			is_major_syncing.clone(),
-			peers.clone(),
-			network_chan.clone(),
-			params.config,
-			params.chain,
-			import_queue.clone(),
-			params.on_demand,
-			params.transaction_pool,
-			params.specialization,
-		)?;
-		let versions: Vec<_> = ((protocol::MIN_VERSION as u8)..=(protocol::CURRENT_VERSION as u8)).collect();
-		let registered = RegisteredProtocol::new(protocol_id, &versions);
-		let (thread, network, peerset) = start_thread(
-			network_to_protocol_sender,
-			network_port,
-			params.network_config,
-			registered,
-		)?;
+	) -> Result<NetworkWorker<B, S, H>, Error> {
+		let (to_worker, from_worker) = mpsc::unbounded();
 
-		let service = Arc::new(Service {
-			status_sinks,
-			is_offline,
-			is_major_syncing,
-			peers,
-			peerset,
-			network,
-			protocol_sender: protocol_sender.clone(),
-			bg_thread: Some(thread),
-		});
+		if let Some(ref path) = params.network_config.net_config_path {
+			fs::create_dir_all(Path::new(path))?;
+		}
 
-		// connect the import-queue to the network service.
-		let link = NetworkLink {
-			protocol_sender,
-			network_sender: network_chan.clone(),
+		// List of multiaddresses that we know in the network.
+		let mut known_addresses = Vec::new();
+		let mut bootnodes = Vec::new();
+		let mut reserved_nodes = Vec::new();
+
+		// Process the bootnodes.
+		for bootnode in params.network_config.boot_nodes.iter() {
+			match parse_str_addr(bootnode) {
+				Ok((peer_id, addr)) => {
+					bootnodes.push(peer_id.clone());
+					known_addresses.push((peer_id, addr));
+				},
+				Err(_) => warn!(target: "sub-libp2p", "Not a valid bootnode address: {}", bootnode),
+			}
+		}
+
+		// Initialize the reserved peers.
+		for reserved in params.network_config.reserved_nodes.iter() {
+			if let Ok((peer_id, addr)) = parse_str_addr(reserved) {
+				reserved_nodes.push(peer_id.clone());
+				known_addresses.push((peer_id, addr));
+			} else {
+				warn!(target: "sub-libp2p", "Not a valid reserved node address: {}", reserved);
+			}
+		}
+
+		let peerset_config = peerset::PeersetConfig {
+			in_peers: params.network_config.in_peers,
+			out_peers: params.network_config.out_peers,
+			bootnodes,
+			reserved_only: params.network_config.non_reserved_mode == NonReservedPeerMode::Deny,
+			reserved_nodes,
 		};
 
-		import_queue.start(Box::new(link))?;
+		// Private and public keys configuration.
+		if let NodeKeyConfig::Secp256k1(_) = params.network_config.node_key {
+			warn!(target: "sub-libp2p", "Secp256k1 keys are deprecated in favour of ed25519");
+		}
+		let local_identity = params.network_config.node_key.clone().into_keypair()?;
+		let local_public = local_identity.public();
+		let local_peer_id = local_public.clone().into_peer_id();
+		info!(target: "sub-libp2p", "Local node identity is: {}", local_peer_id.to_base58());
 
-		Ok((service, network_chan))
+		let num_connected = Arc::new(AtomicUsize::new(0));
+		let is_major_syncing = Arc::new(AtomicBool::new(false));
+		let (protocol, peerset_handle) = Protocol::new(
+			protocol::ProtocolConfig { roles: params.roles },
+			params.chain,
+			params.on_demand.as_ref().map(|od| od.checker().clone())
+				.unwrap_or(Arc::new(AlwaysBadChecker)),
+			params.specialization,
+			params.transaction_pool,
+			params.finality_proof_provider,
+			params.protocol_id,
+			peerset_config,
+		)?;
+
+		// Build the swarm.
+		let (mut swarm, bandwidth) = {
+			let user_agent = format!(
+				"{} ({})",
+				params.network_config.client_version,
+				params.network_config.node_name
+			);
+			let behaviour = Behaviour::new(
+				protocol,
+				user_agent,
+				local_public,
+				known_addresses,
+				match params.network_config.transport {
+					TransportConfig::MemoryOnly => false,
+					TransportConfig::Normal { enable_mdns, .. } => enable_mdns,
+				}
+			);
+			let (transport, bandwidth) = {
+				let (config_mem, config_wasm) = match params.network_config.transport {
+					TransportConfig::MemoryOnly => (true, None),
+					TransportConfig::Normal { wasm_external_transport, .. } =>
+						(false, wasm_external_transport)
+				};
+				transport::build_transport(local_identity, config_mem, config_wasm)
+			};
+			(Swarm::<B, S, H>::new(transport, behaviour, local_peer_id.clone()), bandwidth)
+		};
+
+		// Listen on multiaddresses.
+		for addr in &params.network_config.listen_addresses {
+			if let Err(err) = Swarm::<B, S, H>::listen_on(&mut swarm, addr.clone()) {
+				warn!(target: "sub-libp2p", "Can't listen on {} because: {:?}", addr, err)
+			}
+		}
+
+		// Add external addresses.
+		for addr in &params.network_config.public_addresses {
+			Swarm::<B, S, H>::add_external_address(&mut swarm, addr.clone());
+		}
+
+		let service = Arc::new(NetworkService {
+			bandwidth,
+			num_connected: num_connected.clone(),
+			is_major_syncing: is_major_syncing.clone(),
+			peerset: peerset_handle,
+			local_peer_id,
+			to_worker: to_worker.clone(),
+			_marker: PhantomData,
+		});
+
+		Ok(NetworkWorker {
+			num_connected,
+			is_major_syncing,
+			network_service: swarm,
+			service,
+			import_queue: params.import_queue,
+			from_worker,
+			on_demand_in: params.on_demand.and_then(|od| od.extract_receiver()),
+		})
 	}
 
 	/// Returns the downloaded bytes per second averaged over the past few seconds.
-	#[inline]
 	pub fn average_download_per_sec(&self) -> u64 {
-		self.network.lock().average_download_per_sec()
+		self.service.bandwidth.average_download_per_sec()
 	}
 
 	/// Returns the uploaded bytes per second averaged over the past few seconds.
-	#[inline]
 	pub fn average_upload_per_sec(&self) -> u64 {
-		self.network.lock().average_upload_per_sec()
+		self.service.bandwidth.average_upload_per_sec()
 	}
 
+	/// Returns the number of peers we're connected to.
+	pub fn num_connected_peers(&self) -> usize {
+		self.network_service.user_protocol().num_connected_peers()
+	}
+
+	/// Returns the number of peers we're connected to and that are being queried.
+	pub fn num_active_peers(&self) -> usize {
+		self.network_service.user_protocol().num_active_peers()
+	}
+
+	/// Current global sync state.
+	pub fn sync_state(&self) -> SyncState {
+		self.network_service.user_protocol().sync_state()
+	}
+
+	/// Target sync block number.
+	pub fn best_seen_block(&self) -> Option<NumberFor<B>> {
+		self.network_service.user_protocol().best_seen_block()
+	}
+
+	/// Number of peers participating in syncing.
+	pub fn num_sync_peers(&self) -> u32 {
+		self.network_service.user_protocol().num_sync_peers()
+	}
+
+	/// Adds an address for a node.
+	pub fn add_known_address(&mut self, peer_id: PeerId, addr: Multiaddr) {
+		self.network_service.add_known_address(peer_id, addr);
+	}
+
+	/// Return a `NetworkService` that can be shared through the code base and can be used to
+	/// manipulate the worker.
+	pub fn service(&self) -> &Arc<NetworkService<B, S, H>> {
+		&self.service
+	}
+
+	/// You must call this when a new block is imported by the client.
+	pub fn on_block_imported(&mut self, hash: B::Hash, header: B::Header) {
+		self.network_service.user_protocol_mut().on_block_imported(hash, &header);
+	}
+
+	/// You must call this when a new block is finalized by the client.
+	pub fn on_block_finalized(&mut self, hash: B::Hash, header: B::Header) {
+		self.network_service.user_protocol_mut().on_block_finalized(hash, &header);
+	}
+
+	/// Get network state.
+	///
+	/// **Note**: Use this only for debugging. This API is unstable. There are warnings literaly
+	/// everywhere about this. Please don't use this function to retreive actual information.
+	pub fn network_state(&mut self) -> NetworkState {
+		let swarm = &mut self.network_service;
+		let open = swarm.user_protocol().open_peers().cloned().collect::<Vec<_>>();
+
+		let connected_peers = {
+			let swarm = &mut *swarm;
+			open.iter().filter_map(move |peer_id| {
+				let known_addresses = NetworkBehaviour::addresses_of_peer(&mut **swarm, peer_id)
+					.into_iter().collect();
+
+				let endpoint = if let Some(e) = swarm.node(peer_id).map(|i| i.endpoint()) {
+					e.clone().into()
+				} else {
+					error!(target: "sub-libp2p", "Found state inconsistency between custom protocol \
+						and debug information about {:?}", peer_id);
+					return None
+				};
+
+				Some((peer_id.to_base58(), NetworkStatePeer {
+					endpoint,
+					version_string: swarm.node(peer_id)
+						.and_then(|i| i.client_version().map(|s| s.to_owned())).clone(),
+					latest_ping_time: swarm.node(peer_id).and_then(|i| i.latest_ping()),
+					enabled: swarm.user_protocol().is_enabled(&peer_id),
+					open: swarm.user_protocol().is_open(&peer_id),
+					known_addresses,
+				}))
+			}).collect()
+		};
+
+		let not_connected_peers = {
+			let swarm = &mut *swarm;
+			let list = swarm.known_peers().filter(|p| open.iter().all(|n| n != *p))
+				.cloned().collect::<Vec<_>>();
+			list.into_iter().map(move |peer_id| {
+				(peer_id.to_base58(), NetworkStateNotConnectedPeer {
+					version_string: swarm.node(&peer_id)
+						.and_then(|i| i.client_version().map(|s| s.to_owned())).clone(),
+					latest_ping_time: swarm.node(&peer_id).and_then(|i| i.latest_ping()),
+					known_addresses: NetworkBehaviour::addresses_of_peer(&mut **swarm, &peer_id)
+						.into_iter().collect(),
+				})
+			}).collect()
+		};
+
+		NetworkState {
+			peer_id: Swarm::<B, S, H>::local_peer_id(&swarm).to_base58(),
+			listened_addresses: Swarm::<B, S, H>::listeners(&swarm).cloned().collect(),
+			external_addresses: Swarm::<B, S, H>::external_addresses(&swarm).cloned().collect(),
+			average_download_per_sec: self.service.bandwidth.average_download_per_sec(),
+			average_upload_per_sec: self.service.bandwidth.average_upload_per_sec(),
+			connected_peers,
+			not_connected_peers,
+			peerset: swarm.user_protocol_mut().peerset_debug_info(),
+		}
+	}
+
+	/// Get currently connected peers.
+	pub fn peers_debug_info(&mut self) -> Vec<(PeerId, PeerInfo<B>)> {
+		self.network_service.user_protocol_mut()
+			.peers_info()
+			.map(|(id, info)| (id.clone(), info.clone()))
+			.collect()
+	}
+}
+
+impl<B: BlockT + 'static, S: NetworkSpecialization<B>, H: ExHashT> NetworkService<B, S, H> {
 	/// Returns the network identity of the node.
 	pub fn local_peer_id(&self) -> PeerId {
-		self.network.lock().peer_id().clone()
+		self.local_peer_id.clone()
 	}
 
-	/// Called when a new block is imported by the client.
-	pub fn on_block_imported(&self, hash: B::Hash, header: B::Header) {
-		let _ = self
-			.protocol_sender
-			.send(ProtocolMsg::BlockImported(hash, header));
-	}
-
-	/// Called when a new block is finalized by the client.
-	pub fn on_block_finalized(&self, hash: B::Hash, header: B::Header) {
-		let _ = self
-			.protocol_sender
-			.send(ProtocolMsg::BlockFinalized(hash, header));
-	}
-
-	/// Called when new transactons are imported by the client.
+	/// You must call this when new transactons are imported by the transaction pool.
+	///
+	/// The latest transactions will be fetched from the `TransactionPool` that was passed at
+	/// initialization as part of the configuration.
 	pub fn trigger_repropagate(&self) {
-		let _ = self.protocol_sender.send(ProtocolMsg::PropagateExtrinsics);
+		let _ = self.to_worker.unbounded_send(ServerToWorkerMsg::PropagateExtrinsics);
 	}
 
 	/// Make sure an important block is propagated to peers.
 	///
 	/// In chain-based consensus, we often need to make sure non-best forks are
-	/// at least temporarily synced.
+	/// at least temporarily synced. This function forces such an announcement.
 	pub fn announce_block(&self, hash: B::Hash) {
-		let _ = self.protocol_sender.send(ProtocolMsg::AnnounceBlock(hash));
+		let _ = self.to_worker.unbounded_send(ServerToWorkerMsg::AnnounceBlock(hash));
 	}
 
 	/// Send a consensus message through the gossip
@@ -268,8 +391,8 @@ impl<B: BlockT + 'static, S: NetworkSpecialization<B>> Service<B, S> {
 		recipient: GossipMessageRecipient,
 	) {
 		let _ = self
-			.protocol_sender
-			.send(ProtocolMsg::GossipConsensusMessage(
+			.to_worker
+			.unbounded_send(ServerToWorkerMsg::GossipConsensusMessage(
 				topic, engine_id, message, recipient,
 			));
 	}
@@ -280,289 +403,287 @@ impl<B: BlockT + 'static, S: NetworkSpecialization<B>> Service<B, S> {
 		self.peerset.report_peer(who, cost_benefit);
 	}
 
+	/// Request a justification for the given block from the network.
+	///
+	/// On success, the justification will be passed to the import queue that was part at
+	/// initialization as part of the configuration.
+	pub fn request_justification(&self, hash: &B::Hash, number: NumberFor<B>) {
+		let _ = self
+			.to_worker
+			.unbounded_send(ServerToWorkerMsg::RequestJustification(hash.clone(), number));
+	}
+
 	/// Execute a closure with the chain-specific network specialization.
 	pub fn with_spec<F>(&self, f: F)
-		where F: FnOnce(&mut S, &mut Context<B>) + Send + 'static
+		where F: FnOnce(&mut S, &mut dyn Context<B>) + Send + 'static
 	{
 		let _ = self
-			.protocol_sender
-			.send(ProtocolMsg::ExecuteWithSpec(Box::new(f)));
+			.to_worker
+			.unbounded_send(ServerToWorkerMsg::ExecuteWithSpec(Box::new(f)));
 	}
 
 	/// Execute a closure with the consensus gossip.
 	pub fn with_gossip<F>(&self, f: F)
-		where F: FnOnce(&mut ConsensusGossip<B>, &mut Context<B>) + Send + 'static
+		where F: FnOnce(&mut ConsensusGossip<B>, &mut dyn Context<B>) + Send + 'static
 	{
 		let _ = self
-			.protocol_sender
-			.send(ProtocolMsg::ExecuteWithGossip(Box::new(f)));
+			.to_worker
+			.unbounded_send(ServerToWorkerMsg::ExecuteWithGossip(Box::new(f)));
 	}
 
 	/// Are we in the process of downloading the chain?
-	/// Used by both SyncProvider and SyncOracle.
-	fn is_major_syncing(&self) -> bool {
+	pub fn is_major_syncing(&self) -> bool {
 		self.is_major_syncing.load(Ordering::Relaxed)
+	}
+
+	/// Start getting a value from the DHT.
+	///
+	/// This will generate either a `ValueFound` or a `ValueNotFound` event and pass it to
+	/// `on_event` on the network specialization.
+	pub fn get_value(&mut self, key: &Multihash) {
+		let _ = self
+			.to_worker
+			.unbounded_send(ServerToWorkerMsg::GetValue(key.clone()));
+	}
+
+	/// Start putting a value in the DHT.
+	///
+	/// This will generate either a `ValuePut` or a `ValuePutFailed` event and pass it to
+	/// `on_event` on the network specialization.
+	pub fn put_value(&mut self, key: Multihash, value: Vec<u8>) {
+		let _ = self
+			.to_worker
+			.unbounded_send(ServerToWorkerMsg::PutValue(key, value));
+	}
+
+	/// Connect to unreserved peers and allow unreserved peers to connect.
+	pub fn accept_unreserved_peers(&self) {
+		self.peerset.set_reserved_only(false);
+	}
+
+	/// Disconnect from unreserved peers and deny new unreserved peers to connect.
+	pub fn deny_unreserved_peers(&self) {
+		self.peerset.set_reserved_only(true);
+	}
+
+	/// Removes a `PeerId` from the list of reserved peers.
+	pub fn remove_reserved_peer(&self, peer: PeerId) {
+		self.peerset.remove_reserved_peer(peer);
+	}
+
+	/// Adds a `PeerId` and its address as reserved.
+	pub fn add_reserved_peer(&self, peer: String) -> Result<(), String> {
+		let (peer_id, addr) = parse_str_addr(&peer).map_err(|e| format!("{:?}", e))?;
+		self.peerset.add_reserved_peer(peer_id.clone());
+		let _ = self
+			.to_worker
+			.unbounded_send(ServerToWorkerMsg::AddKnownAddress(peer_id, addr));
+		Ok(())
+	}
+
+	/// Returns the number of peers we're connected to.
+	pub fn num_connected(&self) -> usize {
+		self.num_connected.load(Ordering::Relaxed)
 	}
 }
 
-impl<B: BlockT + 'static, S: NetworkSpecialization<B>> ::consensus::SyncOracle for Service<B, S> {
+impl<B: BlockT + 'static, S: NetworkSpecialization<B>, H: ExHashT>
+	::consensus::SyncOracle for NetworkService<B, S, H> {
 	fn is_major_syncing(&self) -> bool {
 		self.is_major_syncing()
 	}
 
 	fn is_offline(&self) -> bool {
-		self.is_offline.load(Ordering::Relaxed)
+		self.num_connected.load(Ordering::Relaxed) == 0
 	}
 }
 
-impl<B: BlockT + 'static, S: NetworkSpecialization<B>> Drop for Service<B, S> {
-	fn drop(&mut self) {
-		if let Some((sender, join)) = self.bg_thread.take() {
-			let _ = sender.send(());
-			if let Err(e) = join.join() {
-				error!("Error while waiting on background thread: {:?}", e);
-			}
-		}
-	}
+/// Messages sent from the `NetworkService` to the `NetworkWorker`.
+///
+/// Each entry corresponds to a method of `NetworkService`.
+enum ServerToWorkerMsg<B: BlockT, S: NetworkSpecialization<B>> {
+	PropagateExtrinsics,
+	RequestJustification(B::Hash, NumberFor<B>),
+	AnnounceBlock(B::Hash),
+	ExecuteWithSpec(Box<dyn FnOnce(&mut S, &mut dyn Context<B>) + Send>),
+	ExecuteWithGossip(Box<dyn FnOnce(&mut ConsensusGossip<B>, &mut dyn Context<B>) + Send>),
+	GossipConsensusMessage(B::Hash, ConsensusEngineId, Vec<u8>, GossipMessageRecipient),
+	GetValue(Multihash),
+	PutValue(Multihash, Vec<u8>),
+	AddKnownAddress(PeerId, Multiaddr),
 }
 
-impl<B: BlockT + 'static, S: NetworkSpecialization<B>> SyncProvider<B> for Service<B, S> {
-	fn is_major_syncing(&self) -> bool {
-		self.is_major_syncing()
-	}
-
-	/// Get sync status
-	fn status(&self) -> mpsc::UnboundedReceiver<ProtocolStatus<B>> {
-		let (sink, stream) = mpsc::unbounded();
-		self.status_sinks.lock().push(sink);
-		stream
-	}
-
-	fn network_state(&self) -> NetworkState {
-		self.network.lock().state()
-	}
-
-	fn peers(&self) -> Vec<(PeerId, PeerInfo<B>)> {
-		let peers = (*self.peers.read()).clone();
-		peers.into_iter().map(|(idx, connected)| (idx, connected.peer_info)).collect()
-	}
+/// Main network worker. Must be polled in order for the network to advance.
+///
+/// You are encouraged to poll this in a separate background thread or task.
+#[must_use = "The NetworkWorker must be polled in order for the network to work"]
+pub struct NetworkWorker<B: BlockT + 'static, S: NetworkSpecialization<B>, H: ExHashT> {
+	/// Updated by the `NetworkWorker` and loaded by the `NetworkService`.
+	num_connected: Arc<AtomicUsize>,
+	/// Updated by the `NetworkWorker` and loaded by the `NetworkService`.
+	is_major_syncing: Arc<AtomicBool>,
+	/// The network service that can be extracted and shared through the codebase.
+	service: Arc<NetworkService<B, S, H>>,
+	/// The *actual* network.
+	network_service: Swarm<B, S, H>,
+	/// The import queue that was passed as initialization.
+	import_queue: Box<dyn ImportQueue<B>>,
+	/// Messages from the `NetworkService` and that must be processed.
+	from_worker: mpsc::UnboundedReceiver<ServerToWorkerMsg<B, S>>,
+	/// Receiver for queries from the on-demand that must be processed.
+	on_demand_in: Option<mpsc::UnboundedReceiver<RequestData<B>>>,
 }
 
-/// Trait for managing network
-pub trait ManageNetwork {
-	/// Set to allow unreserved peers to connect
-	fn accept_unreserved_peers(&self);
-	/// Set to deny unreserved peers to connect
-	fn deny_unreserved_peers(&self);
-	/// Remove reservation for the peer
-	fn remove_reserved_peer(&self, peer: PeerId);
-	/// Add reserved peer
-	fn add_reserved_peer(&self, peer: String) -> Result<(), String>;
-}
+impl<B: BlockT + 'static, S: NetworkSpecialization<B>, H: ExHashT> Future for NetworkWorker<B, S, H> {
+	type Item = ();
+	type Error = io::Error;
 
-impl<B: BlockT + 'static, S: NetworkSpecialization<B>> ManageNetwork for Service<B, S> {
-	fn accept_unreserved_peers(&self) {
-		self.peerset.set_reserved_only(false);
-	}
+	fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+		// Poll the import queue for actions to perform.
+		self.import_queue.poll_actions(&mut NetworkLink {
+			protocol: &mut self.network_service,
+		});
 
-	fn deny_unreserved_peers(&self) {
-		self.peerset.set_reserved_only(true);
-	}
-
-	fn remove_reserved_peer(&self, peer: PeerId) {
-		self.peerset.remove_reserved_peer(peer);
-	}
-
-	fn add_reserved_peer(&self, peer: String) -> Result<(), String> {
-		let (peer_id, addr) = parse_str_addr(&peer).map_err(|e| format!("{:?}", e))?;
-		self.peerset.add_reserved_peer(peer_id.clone());
-		self.network.lock().add_known_address(peer_id, addr);
-		Ok(())
-	}
-}
-
-
-/// Create a NetworkPort/Chan pair.
-pub fn network_channel<B: BlockT + 'static>() -> (NetworkChan<B>, NetworkPort<B>) {
-	let (network_sender, network_receiver) = channel::unbounded();
-	let task_notify = Arc::new(AtomicTask::new());
-	let network_port = NetworkPort::new(network_receiver, task_notify.clone());
-	let network_chan = NetworkChan::new(network_sender, task_notify);
-	(network_chan, network_port)
-}
-
-
-/// A sender of NetworkMsg that notifies a task when a message has been sent.
-#[derive(Clone)]
-pub struct NetworkChan<B: BlockT + 'static> {
-	sender: Sender<NetworkMsg<B>>,
-	task_notify: Arc<AtomicTask>,
-}
-
-impl<B: BlockT + 'static> NetworkChan<B> {
-	/// Create a new network chan.
-	pub fn new(sender: Sender<NetworkMsg<B>>, task_notify: Arc<AtomicTask>) -> Self {
-		 NetworkChan {
-			sender,
-			task_notify,
-		}
-	}
-
-	/// Send a messaging, to be handled on a stream. Notify the task handling the stream.
-	pub fn send(&self, msg: NetworkMsg<B>) {
-		let _ = self.sender.send(msg);
-		self.task_notify.notify();
-	}
-}
-
-impl<B: BlockT + 'static> Drop for NetworkChan<B> {
-	/// Notifying the task when a sender is dropped(when all are dropped, the stream is finished).
-	fn drop(&mut self) {
-		self.task_notify.notify();
-	}
-}
-
-
-/// A receiver of NetworkMsg that makes the protocol-id available with each message.
-pub struct NetworkPort<B: BlockT + 'static> {
-	receiver: Receiver<NetworkMsg<B>>,
-	task_notify: Arc<AtomicTask>,
-}
-
-impl<B: BlockT + 'static> NetworkPort<B> {
-	/// Create a new network port for a given protocol-id.
-	pub fn new(receiver: Receiver<NetworkMsg<B>>, task_notify: Arc<AtomicTask>) -> Self {
-		Self {
-			receiver,
-			task_notify,
-		}
-	}
-
-	/// Receive a message, if any is currently-enqueued.
-	/// Register the current tokio task for notification when a new message is available.
-	pub fn take_one_message(&self) -> Result<Option<NetworkMsg<B>>, ()> {
-		self.task_notify.register();
-		match self.receiver.try_recv() {
-			Ok(msg) => Ok(Some(msg)),
-			Err(TryRecvError::Empty) => Ok(None),
-			Err(TryRecvError::Disconnected) => Err(()),
-		}
-	}
-
-	/// Get a reference to the underlying crossbeam receiver.
-	#[cfg(any(test, feature = "test-helpers"))]
-	pub fn receiver(&self) -> &Receiver<NetworkMsg<B>> {
-		&self.receiver
-	}
-}
-
-/// Messages to be handled by NetworkService.
-#[derive(Debug)]
-pub enum NetworkMsg<B: BlockT + 'static> {
-	/// Send an outgoing custom message.
-	Outgoing(PeerId, Message<B>),
-	/// Disconnect a peer we're connected to, or do nothing if we're not connected.
-	DisconnectPeer(PeerId),
-	/// Performs a reputation adjustement on a peer.
-	ReportPeer(PeerId, i32),
-	/// Synchronization response.
-	#[cfg(any(test, feature = "test-helpers"))]
-	Synchronized,
-}
-
-/// Starts the background thread that handles the networking.
-fn start_thread<B: BlockT + 'static>(
-	protocol_sender: Sender<FromNetworkMsg<B>>,
-	network_port: NetworkPort<B>,
-	config: NetworkConfiguration,
-	registered: RegisteredProtocol<Message<B>>,
-) -> Result<((oneshot::Sender<()>, thread::JoinHandle<()>), Arc<Mutex<NetworkService<Message<B>>>>, PeersetHandle), Error> {
-	// Start the main service.
-	let (service, peerset) = match start_service(config, registered) {
-		Ok((service, peerset)) => (Arc::new(Mutex::new(service)), peerset),
-		Err(err) => {
-			warn!("Error starting network: {}", err);
-			return Err(err.into())
-		},
-	};
-
-	let (close_tx, close_rx) = oneshot::channel();
-	let service_clone = service.clone();
-	let mut runtime = RuntimeBuilder::new().name_prefix("libp2p-").build()?;
-	let peerset_clone = peerset.clone();
-	let thread = thread::Builder::new().name("network".to_string()).spawn(move || {
-		let fut = run_thread(protocol_sender, service_clone, network_port, peerset_clone)
-			.select(close_rx.then(|_| Ok(())))
-			.map(|(val, _)| val)
-			.map_err(|(err,_ )| err);
-
-		// Note that we use `block_on` and not `block_on_all` because we want to kill the thread
-		// instantly if `close_rx` receives something.
-		match runtime.block_on(fut) {
-			Ok(()) => debug!(target: "sub-libp2p", "Networking thread finished"),
-			Err(err) => error!(target: "sub-libp2p", "Error while running libp2p: {:?}", err),
-		};
-	})?;
-
-	Ok(((close_tx, thread), service, peerset))
-}
-
-/// Runs the background thread that handles the networking.
-fn run_thread<B: BlockT + 'static>(
-	protocol_sender: Sender<FromNetworkMsg<B>>,
-	network_service: Arc<Mutex<NetworkService<Message<B>>>>,
-	network_port: NetworkPort<B>,
-	peerset: PeersetHandle,
-) -> impl Future<Item = (), Error = io::Error> {
-
-	futures::future::poll_fn(move || {
-		loop {
-			match network_port.take_one_message() {
-				Ok(None) => break,
-				Ok(Some(NetworkMsg::Outgoing(who, outgoing_message))) =>
-					network_service.lock().send_custom_message(&who, outgoing_message),
-				Ok(Some(NetworkMsg::ReportPeer(who, reputation))) =>
-					peerset.report_peer(who, reputation),
-				Ok(Some(NetworkMsg::DisconnectPeer(who))) =>
-					network_service.lock().drop_node(&who),
-				#[cfg(any(test, feature = "test-helpers"))]
-				Ok(Some(NetworkMsg::Synchronized)) => {}
-
-				Err(_) => return Ok(Async::Ready(())),
+		// Check for new incoming on-demand requests.
+		if let Some(on_demand_in) = self.on_demand_in.as_mut() {
+			while let Ok(Async::Ready(Some(rq))) = on_demand_in.poll() {
+				self.network_service.user_protocol_mut().add_on_demand_request(rq);
 			}
 		}
 
 		loop {
-			match network_service.lock().poll() {
+			// Process the next message coming from the `NetworkService`.
+			let msg = match self.from_worker.poll() {
+				Ok(Async::Ready(Some(msg))) => msg,
+				Ok(Async::Ready(None)) | Err(_) => return Ok(Async::Ready(())),
 				Ok(Async::NotReady) => break,
-				Ok(Async::Ready(Some(NetworkServiceEvent::OpenedCustomProtocol { peer_id, version, debug_info, .. }))) => {
-					debug_assert!(
-						version <= protocol::CURRENT_VERSION as u8
-						&& version >= protocol::MIN_VERSION as u8
-					);
-					let _ = protocol_sender.send(FromNetworkMsg::PeerConnected(peer_id, debug_info));
+			};
+
+			match msg {
+				ServerToWorkerMsg::ExecuteWithSpec(task) => {
+					let protocol = self.network_service.user_protocol_mut();
+					let (mut context, spec) = protocol.specialization_lock();
+					task(spec, &mut context);
+				},
+				ServerToWorkerMsg::ExecuteWithGossip(task) => {
+					let protocol = self.network_service.user_protocol_mut();
+					let (mut context, gossip) = protocol.consensus_gossip_lock();
+					task(gossip, &mut context);
 				}
-				Ok(Async::Ready(Some(NetworkServiceEvent::ClosedCustomProtocol { peer_id, debug_info, .. }))) => {
-					let _ = protocol_sender.send(FromNetworkMsg::PeerDisconnected(peer_id, debug_info));
-				}
-				Ok(Async::Ready(Some(NetworkServiceEvent::CustomMessage { peer_id, message, .. }))) => {
-					let _ = protocol_sender.send(FromNetworkMsg::CustomMessage(peer_id, message));
-				}
-				Ok(Async::Ready(Some(NetworkServiceEvent::Clogged { peer_id, messages, .. }))) => {
-					debug!(target: "sync", "{} clogging messages:", messages.len());
-					for msg in messages.into_iter().take(5) {
-						debug!(target: "sync", "{:?}", msg);
-						let _ = protocol_sender.send(FromNetworkMsg::PeerClogged(peer_id.clone(), Some(msg)));
-					}
-				}
-				Ok(Async::Ready(None)) => return Ok(Async::Ready(())),
+				ServerToWorkerMsg::GossipConsensusMessage(topic, engine_id, message, recipient) =>
+					self.network_service.user_protocol_mut().gossip_consensus_message(topic, engine_id, message, recipient),
+				ServerToWorkerMsg::AnnounceBlock(hash) =>
+					self.network_service.user_protocol_mut().announce_block(hash),
+				ServerToWorkerMsg::RequestJustification(hash, number) =>
+					self.network_service.user_protocol_mut().request_justification(&hash, number),
+				ServerToWorkerMsg::PropagateExtrinsics =>
+					self.network_service.user_protocol_mut().propagate_extrinsics(),
+				ServerToWorkerMsg::GetValue(key) =>
+					self.network_service.get_value(&key),
+				ServerToWorkerMsg::PutValue(key, value) =>
+					self.network_service.put_value(key, value),
+				ServerToWorkerMsg::AddKnownAddress(peer_id, addr) =>
+					self.network_service.add_known_address(peer_id, addr),
+			}
+		}
+
+		loop {
+			// Process the next action coming from the network.
+			let poll_value = self.network_service.poll();
+
+			let outcome = match poll_value {
+				Ok(Async::NotReady) => break,
+				Ok(Async::Ready(Some(BehaviourOut::SubstrateAction(outcome)))) => outcome,
+				Ok(Async::Ready(Some(BehaviourOut::Dht(ev)))) => {
+					self.network_service.user_protocol_mut()
+						.on_event(Event::Dht(ev));
+					CustomMessageOutcome::None
+				},
+				Ok(Async::Ready(None)) => CustomMessageOutcome::None,
 				Err(err) => {
 					error!(target: "sync", "Error in the network: {:?}", err);
 					return Err(err)
 				}
+			};
+
+			match outcome {
+				CustomMessageOutcome::BlockImport(origin, blocks) =>
+					self.import_queue.import_blocks(origin, blocks),
+				CustomMessageOutcome::JustificationImport(origin, hash, nb, justification) =>
+					self.import_queue.import_justification(origin, hash, nb, justification),
+				CustomMessageOutcome::FinalityProofImport(origin, hash, nb, proof) =>
+					self.import_queue.import_finality_proof(origin, hash, nb, proof),
+				CustomMessageOutcome::None => {}
 			}
 		}
 
+		// Update the variables shared with the `NetworkService`.
+		self.num_connected.store(self.network_service.user_protocol_mut().num_connected_peers(), Ordering::Relaxed);
+		self.is_major_syncing.store(match self.network_service.user_protocol_mut().sync_state() {
+			SyncState::Idle => false,
+			SyncState::Downloading => true,
+		}, Ordering::Relaxed);
+
 		Ok(Async::NotReady)
-	})
+	}
+}
+
+/// The libp2p swarm, customized for our needs.
+type Swarm<B, S, H> = libp2p::core::Swarm<
+	Boxed<(PeerId, StreamMuxerBox), io::Error>,
+	Behaviour<B, S, H>
+>;
+
+// Implementation of `import_queue::Link` trait using the available local variables.
+struct NetworkLink<'a, B: BlockT, S: NetworkSpecialization<B>, H: ExHashT> {
+	protocol: &'a mut Swarm<B, S, H>,
+}
+
+impl<'a, B: BlockT, S: NetworkSpecialization<B>, H: ExHashT> Link<B> for NetworkLink<'a, B, S, H> {
+	fn block_imported(&mut self, hash: &B::Hash, number: NumberFor<B>) {
+		self.protocol.user_protocol_mut().block_imported(&hash, number)
+	}
+	fn blocks_processed(&mut self, hashes: Vec<B::Hash>, has_error: bool) {
+		self.protocol.user_protocol_mut().blocks_processed(hashes, has_error)
+	}
+	fn justification_imported(&mut self, who: PeerId, hash: &B::Hash, number: NumberFor<B>, success: bool) {
+		self.protocol.user_protocol_mut().justification_import_result(hash.clone(), number, success);
+		if !success {
+			info!("Invalid justification provided by {} for #{}", who, hash);
+			self.protocol.user_protocol_mut().disconnect_peer(&who);
+			self.protocol.user_protocol_mut().report_peer(who, i32::min_value());
+		}
+	}
+	fn clear_justification_requests(&mut self) {
+		self.protocol.user_protocol_mut().clear_justification_requests()
+	}
+	fn request_justification(&mut self, hash: &B::Hash, number: NumberFor<B>) {
+		self.protocol.user_protocol_mut().request_justification(hash, number)
+	}
+	fn request_finality_proof(&mut self, hash: &B::Hash, number: NumberFor<B>) {
+		self.protocol.user_protocol_mut().request_finality_proof(hash, number)
+	}
+	fn finality_proof_imported(
+		&mut self,
+		who: PeerId,
+		request_block: (B::Hash, NumberFor<B>),
+		finalization_result: Result<(B::Hash, NumberFor<B>), ()>,
+	) {
+		let success = finalization_result.is_ok();
+		self.protocol.user_protocol_mut().finality_proof_import_result(request_block, finalization_result);
+		if !success {
+			info!("Invalid finality proof provided by {} for #{}", who, request_block.0);
+			self.protocol.user_protocol_mut().disconnect_peer(&who);
+			self.protocol.user_protocol_mut().report_peer(who, i32::min_value());
+		}
+	}
+	fn report_peer(&mut self, who: PeerId, reputation_change: i32) {
+		self.protocol.user_protocol_mut().report_peer(who, reputation_change)
+	}
+	fn restart(&mut self) {
+		self.protocol.user_protocol_mut().restart()
+	}
+	fn set_finality_proof_request_builder(&mut self, builder: SharedFinalityProofRequestBuilder<B>) {
+		self.protocol.user_protocol_mut().set_finality_proof_request_builder(builder)
+	}
 }

@@ -53,7 +53,12 @@ mod tests {
 	use primitives::Blake2Hasher;
 	use hex::*;
 
-	native_executor_instance!(Executor, test_client::runtime::api::dispatch, test_client::runtime::native_version, include_bytes!("../../test-runtime/wasm/target/wasm32-unknown-unknown/release/substrate_test_runtime.compact.wasm"));
+	native_executor_instance!(
+		Executor,
+		test_client::runtime::api::dispatch,
+		test_client::runtime::native_version,
+		test_client::runtime::WASM_BINARY
+	);
 
 	fn executor() -> executor::NativeExecutor<Executor> {
 		NativeExecutionDispatch::new(None)
@@ -84,7 +89,7 @@ mod tests {
 
 		state_machine::new(
 			backend,
-			Some(&InMemoryChangesTrieStorage::new()),
+			Some(&InMemoryChangesTrieStorage::<_, u64>::new()),
 			state_machine::NeverOffchainExt::new(),
 			&mut overlay,
 			&executor(),
@@ -97,7 +102,7 @@ mod tests {
 		for tx in transactions.iter() {
 			state_machine::new(
 				backend,
-				Some(&InMemoryChangesTrieStorage::new()),
+				Some(&InMemoryChangesTrieStorage::<_, u64>::new()),
 				state_machine::NeverOffchainExt::new(),
 				&mut overlay,
 				&executor(),
@@ -110,7 +115,7 @@ mod tests {
 
 		let (ret_data, _, _) = state_machine::new(
 			backend,
-			Some(&InMemoryChangesTrieStorage::new()),
+			Some(&InMemoryChangesTrieStorage::<_, u64>::new()),
 			state_machine::NeverOffchainExt::new(),
 			&mut overlay,
 			&executor(),
@@ -157,7 +162,7 @@ mod tests {
 		let mut overlay = OverlayedChanges::default();
 		let _ = state_machine::new(
 			&backend,
-			Some(&InMemoryChangesTrieStorage::new()),
+			Some(&InMemoryChangesTrieStorage::<_, u64>::new()),
 			state_machine::NeverOffchainExt::new(),
 			&mut overlay,
 			&executor(),
@@ -186,7 +191,7 @@ mod tests {
 		let mut overlay = OverlayedChanges::default();
 		let _ = state_machine::new(
 			&backend,
-			Some(&InMemoryChangesTrieStorage::new()),
+			Some(&InMemoryChangesTrieStorage::<_, u64>::new()),
 			state_machine::NeverOffchainExt::new(),
 			&mut overlay,
 			&executor(),
@@ -215,7 +220,7 @@ mod tests {
 		let mut overlay = OverlayedChanges::default();
 		let r = state_machine::new(
 			&backend,
-			Some(&InMemoryChangesTrieStorage::new()),
+			Some(&InMemoryChangesTrieStorage::<_, u64>::new()),
 			state_machine::NeverOffchainExt::new(),
 			&mut overlay,
 			&Executor::new(None),
