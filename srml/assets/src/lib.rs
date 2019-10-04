@@ -130,10 +130,10 @@
 // Ensure we're `no_std` when compiling for Wasm.
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use srml_support::{StorageValue, StorageMap, Parameter, decl_module, decl_event, decl_storage, ensure};
-use primitives::traits::{Member, SimpleArithmetic, Zero, StaticLookup};
+use support::{Parameter, decl_module, decl_event, decl_storage, ensure};
+use sr_primitives::traits::{Member, SimpleArithmetic, Zero, StaticLookup};
 use system::ensure_signed;
-use primitives::traits::One;
+use sr_primitives::traits::One;
 
 /// The module configuration trait.
 pub trait Trait: system::Trait {
@@ -149,7 +149,7 @@ pub trait Trait: system::Trait {
 
 decl_module! {
 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
-		fn deposit_event<T>() = default;
+		fn deposit_event() = default;
 		/// Issue a new class of fungible assets. There are, and will only ever be, `total`
 		/// such assets and they'll all belong to the `origin` initially. It will have an
 		/// identifier `AssetId` instance: this will be specified in the `Issued` event.
@@ -159,7 +159,7 @@ decl_module! {
 			let id = Self::next_asset_id();
 			<NextAssetId<T>>::mutate(|id| *id += One::one());
 
-			<Balances<T>>::insert((id, origin.clone()), total);
+			<Balances<T>>::insert((id, &origin), total);
 			<TotalSupply<T>>::insert(id, total);
 
 			Self::deposit_event(RawEvent::Issued(id, origin, total));
@@ -186,7 +186,7 @@ decl_module! {
 		/// Destroy any assets of `id` owned by `origin`.
 		fn destroy(origin, #[compact] id: T::AssetId) {
 			let origin = ensure_signed(origin)?;
-			let balance = <Balances<T>>::take((id, origin.clone()));
+			let balance = <Balances<T>>::take((id, &origin));
 			ensure!(!balance.is_zero(), "origin balance should be non-zero");
 
 			<TotalSupply<T>>::mutate(id, |total_supply| *total_supply -= balance);
@@ -240,11 +240,11 @@ mod tests {
 	use super::*;
 
 	use runtime_io::with_externalities;
-	use srml_support::{impl_outer_origin, assert_ok, assert_noop};
-	use substrate_primitives::{H256, Blake2Hasher};
+	use support::{impl_outer_origin, assert_ok, assert_noop, parameter_types};
+	use primitives::{H256, Blake2Hasher};
 	// The testing primitives are very useful for avoiding having to work with signatures
 	// or public keys. `u64` is used as the `AccountId` and no `Signature`s are required.
-	use primitives::{traits::{BlakeTwo256, IdentityLookup}, testing::Header};
+	use sr_primitives::{Perbill, traits::{BlakeTwo256, IdentityLookup}, testing::Header};
 
 	impl_outer_origin! {
 		pub enum Origin for Test {}
@@ -255,16 +255,29 @@ mod tests {
 	// configuration traits of modules we want to use.
 	#[derive(Clone, Eq, PartialEq)]
 	pub struct Test;
+	parameter_types! {
+		pub const BlockHashCount: u64 = 250;
+		pub const MaximumBlockWeight: u32 = 1024;
+		pub const MaximumBlockLength: u32 = 2 * 1024;
+		pub const AvailableBlockRatio: Perbill = Perbill::one();
+	}
 	impl system::Trait for Test {
 		type Origin = Origin;
 		type Index = u64;
+		type Call = ();
 		type BlockNumber = u64;
 		type Hash = H256;
 		type Hashing = BlakeTwo256;
 		type AccountId = u64;
 		type Lookup = IdentityLookup<Self::AccountId>;
 		type Header = Header;
+		type WeightMultiplierUpdate = ();
 		type Event = ();
+		type BlockHashCount = BlockHashCount;
+		type MaximumBlockWeight = MaximumBlockWeight;
+		type AvailableBlockRatio = AvailableBlockRatio;
+		type MaximumBlockLength = MaximumBlockLength;
+		type Version = ();
 	}
 	impl Trait for Test {
 		type Event = ();
@@ -276,7 +289,7 @@ mod tests {
 	// This function basically just builds a genesis storage key/value store according to
 	// our desired mockup.
 	fn new_test_ext() -> runtime_io::TestExternalities<Blake2Hasher> {
-		system::GenesisConfig::default().build_storage::<Test>().unwrap().0.into()
+		system::GenesisConfig::default().build_storage::<Test>().unwrap().into()
 	}
 
 	#[test]

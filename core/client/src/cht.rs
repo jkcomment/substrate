@@ -23,14 +23,12 @@
 //! root has. A correct proof implies that the claimed block is identical to the one
 //! we discarded.
 
-use std::collections::HashSet;
-
 use hash_db;
-use parity_codec::Encode;
+use codec::Encode;
 use trie;
 
 use primitives::{H256, convert_hash};
-use runtime_primitives::traits::{Header as HeaderT, SimpleArithmetic, Zero, One};
+use sr_primitives::traits::{Header as HeaderT, SimpleArithmetic, Zero, One};
 use state_machine::backend::InMemory as InMemoryState;
 use state_machine::{MemoryDB, TrieBackend, Backend as StateBackend,
 	prove_read_on_trie_backend, read_proof_check, read_proof_check_on_proving_backend};
@@ -78,7 +76,8 @@ pub fn compute_root<Header, Hasher, I>(
 		Hasher::Out: Ord,
 		I: IntoIterator<Item=ClientResult<Option<Header::Hash>>>,
 {
-	Ok(trie::trie_root::<Hasher, _, _, _>(
+	use trie::TrieConfiguration;
+	Ok(trie::trie_types::Layout::<Hasher>::trie_root(
 		build_pairs::<Header, I>(cht_size, cht_num, hashes)?
 	))
 }
@@ -104,15 +103,10 @@ pub fn build_proof<Header, Hasher, BlocksI, HashesI>(
 	let mut storage = InMemoryState::<Hasher>::default().update(transaction);
 	let trie_storage = storage.as_trie_backend()
 		.expect("InMemoryState::as_trie_backend always returns Some; qed");
-	let mut total_proof = HashSet::new();
-	for block in blocks.into_iter() {
-		debug_assert_eq!(block_to_cht_number(cht_size, block), Some(cht_num));
-
-		let (value, proof) = prove_read_on_trie_backend(trie_storage, &encode_cht_key(block))?;
-		assert!(value.is_some(), "we have just built trie that includes the value for block");
-		total_proof.extend(proof);
-	}
-	Ok(total_proof.into_iter().collect())
+	prove_read_on_trie_backend(
+		trie_storage,
+		blocks.into_iter().map(|number| encode_cht_key(number)),
+	).map_err(ClientError::Execution)
 }
 
 /// Check CHT-based header proof.
@@ -127,9 +121,21 @@ pub fn check_proof<Header, Hasher>(
 		Hasher: hash_db::Hasher,
 		Hasher::Out: Ord,
 {
-	do_check_proof::<Header, Hasher, _>(local_root, local_number, remote_hash, move |local_root, local_cht_key|
-		read_proof_check::<Hasher>(local_root, remote_proof,
-			local_cht_key).map_err(|e| ClientError::from(e)))
+	do_check_proof::<Header, Hasher, _>(
+		local_root,
+		local_number,
+		remote_hash,
+		move |local_root, local_cht_key|
+			read_proof_check::<Hasher, _>(
+				local_root,
+				remote_proof,
+				::std::iter::once(local_cht_key),
+			)
+			.map(|mut map| map
+				.remove(local_cht_key)
+				.expect("checked proof of local_cht_key; qed"))
+			.map_err(|e| ClientError::from(e)),
+	)
 }
 
 /// Check CHT-based header proof on pre-created proving backend.
@@ -144,9 +150,16 @@ pub fn check_proof_on_proving_backend<Header, Hasher>(
 		Hasher: hash_db::Hasher,
 		Hasher::Out: Ord,
 {
-	do_check_proof::<Header, Hasher, _>(local_root, local_number, remote_hash, |_, local_cht_key|
-		read_proof_check_on_proving_backend::<Hasher>(
-			proving_backend, local_cht_key).map_err(|e| ClientError::from(e)))
+	do_check_proof::<Header, Hasher, _>(
+		local_root,
+		local_number,
+		remote_hash,
+		|_, local_cht_key|
+			read_proof_check_on_proving_backend::<Hasher>(
+				proving_backend,
+				local_cht_key,
+			).map_err(|e| ClientError::from(e)),
+	)
 }
 
 /// Check CHT-based header proof using passed checker function.

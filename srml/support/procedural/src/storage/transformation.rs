@@ -35,7 +35,7 @@ use syn::{
 	},
 	parse_macro_input,
 };
-use quote::quote;
+use quote::{quote, quote_spanned};
 
 use super::*;
 
@@ -122,7 +122,7 @@ pub fn decl_storage_impl(input: TokenStream) -> TokenStream {
 		&cratename,
 		&storage_lines,
 		&where_clause,
-	);
+	).unwrap_or_else(|err| err.to_compile_error());
 
 	let decl_store_items = decl_store_items(
 		&storage_lines,
@@ -138,13 +138,14 @@ pub fn decl_storage_impl(input: TokenStream) -> TokenStream {
 		&instance_opts.instance,
 		&storage_lines,
 	);
-	let (store_default_struct, store_functions_to_metadata) = store_functions_to_metadata(
+	let (store_default_struct, store_metadata) = store_functions_to_metadata(
 		&scrate,
 		&traitinstance,
 		&traittype,
 		&instance_opts,
 		&storage_lines,
 		&where_clause,
+		&cratename,
 	);
 
 	let InstanceOpts {
@@ -153,8 +154,14 @@ pub fn decl_storage_impl(input: TokenStream) -> TokenStream {
 		..
 	} = instance_opts;
 
-	let cratename_string = cratename.to_string();
 	let expanded = quote! {
+		use #scrate::{
+			StorageValue as _,
+			StorageMap as _,
+			StorageLinkedMap as _,
+			StorageDoubleMap as _
+		};
+
 		#scrate_decl
 		#decl_storage_items
 		#visibility trait #storetype {
@@ -171,12 +178,8 @@ pub fn decl_storage_impl(input: TokenStream) -> TokenStream {
 		{
 			#impl_store_fns
 			#[doc(hidden)]
-			pub fn store_metadata_functions() -> &'static [#scrate::metadata::StorageEntryMetadata] {
-				#store_functions_to_metadata
-			}
-			#[doc(hidden)]
-			pub fn store_metadata_name() -> &'static str {
-				#cratename_string
+			pub fn storage_metadata() -> #scrate::metadata::StorageMetadata {
+				#store_metadata
 			}
 		}
 
@@ -334,11 +337,11 @@ fn decl_store_extra_genesis(
 						let v = (#builder)(&self);
 						<
 							#name<#struct_trait #instance> as
-							#scrate::storage::hashed::generator::StorageValue<#typ>
-						>::put(&v, storage);
+							#scrate::storage::StorageValue<#typ>
+						>::put::<#typ>(v);
 					}}
 				},
-				DeclStorageTypeInfosKind::Map { key_type, .. } => {
+				DeclStorageTypeInfosKind::Map { key_type, is_linked, .. } => {
 					let struct_trait = if ext::type_contains_ident(&type_infos.value_type, traitinstance)
 						|| ext::type_contains_ident(key_type, traitinstance)
 					{
@@ -348,13 +351,19 @@ fn decl_store_extra_genesis(
 						quote!()
 					};
 
+					let map = if is_linked {
+						quote! { StorageLinkedMap }
+					} else {
+						quote! { StorageMap }
+					};
+
 					quote!{{
 						let data = (#builder)(&self);
 						data.into_iter().for_each(|(k, v)| {
 							<
 								#name<#struct_trait #instance> as
-								#scrate::storage::hashed::generator::StorageMap<#key_type, #typ>
-							>::insert(&k, &v, storage);
+								#scrate::storage::#map<#key_type, #typ>
+							>::insert::<#key_type, #typ>(k, v);
 						});
 					}}
 				},
@@ -374,8 +383,8 @@ fn decl_store_extra_genesis(
 						data.into_iter().for_each(|(k1, k2, v)| {
 							<
 								#name<#struct_trait #instance> as
-								#scrate::storage::unhashed::generator::StorageDoubleMap<#key1_type, #key2_type, #typ>
-							>::insert(&k1, &k2, &v, storage);
+								#scrate::storage::StorageDoubleMap<#key1_type, #key2_type, #typ>
+							>::insert::<#key1_type, #key2_type, #typ>(k1, k2, v);
 						});
 					}}
 				},
@@ -384,7 +393,7 @@ fn decl_store_extra_genesis(
 	}
 
 	let mut has_scall = false;
-	let mut scall = quote!{ ( |_, _, _| {} ) };
+	let mut scall = quote!{ let scall: fn(&Self) = |_| {}; scall };
 	let mut genesis_extrafields = TokenStream2::new();
 	let mut genesis_extrafields_default = TokenStream2::new();
 
@@ -421,7 +430,9 @@ fn decl_store_extra_genesis(
 					}
 					assimilate_require_generic |= ext::expr_contains_ident(&expr.content, traitinstance);
 					let content = &expr.content;
-					scall = quote!( ( #content ) );
+					scall = quote_spanned! { expr.span() =>
+						let scall: fn(&Self) = #content; scall
+					};
 					has_scall = true;
 				},
 			}
@@ -535,43 +546,46 @@ fn decl_store_extra_genesis(
 			impl#fparam_impl GenesisConfig#sparam #genesis_where_clause {
 				pub fn build_storage #fn_generic (self) -> std::result::Result<
 					(
-						#scrate::runtime_primitives::StorageOverlay,
-						#scrate::runtime_primitives::ChildrenStorageOverlay,
+						#scrate::sr_primitives::StorageOverlay,
+						#scrate::sr_primitives::ChildrenStorageOverlay,
 					),
 					String
 				> #fn_where_clause {
-					let mut storage = Default::default();
-					let mut child_storage = Default::default();
-					self.assimilate_storage::<#fn_traitinstance>(&mut storage, &mut child_storage)?;
-					Ok((storage, child_storage))
+					let mut storage = (Default::default(), Default::default());
+					self.assimilate_storage::<#fn_traitinstance>(&mut storage)?;
+					Ok(storage)
 				}
 
 				/// Assimilate the storage for this module into pre-existing overlays.
 				pub fn assimilate_storage #fn_generic (
 					self,
-					r: &mut #scrate::runtime_primitives::StorageOverlay,
-					c: &mut #scrate::runtime_primitives::ChildrenStorageOverlay,
+					tuple_storage: &mut (
+						#scrate::sr_primitives::StorageOverlay,
+						#scrate::sr_primitives::ChildrenStorageOverlay,
+					),
 				) -> std::result::Result<(), String> #fn_where_clause {
-					let storage = r;
+					#scrate::with_storage(tuple_storage, || {
+						#builders
 
-					#builders
+						#scall(&self);
 
-					#scall(storage, c, &self);
-
-					Ok(())
+						Ok(())
+					})
 				}
 			}
 
 			#[cfg(feature = "std")]
-			impl#build_storage_impl #scrate::runtime_primitives::#impl_trait
+			impl#build_storage_impl #scrate::sr_primitives::#impl_trait
 				for GenesisConfig#sparam #build_storage_where_clause
 			{
 				fn build_module_genesis_storage(
 					self,
-					r: &mut #scrate::runtime_primitives::StorageOverlay,
-					c: &mut #scrate::runtime_primitives::ChildrenStorageOverlay,
+					storage: &mut (
+						#scrate::sr_primitives::StorageOverlay,
+						#scrate::sr_primitives::ChildrenStorageOverlay,
+					),
 				) -> std::result::Result<(), String> {
-					self.assimilate_storage::<#fn_traitinstance> (r, c)
+					self.assimilate_storage::<#fn_traitinstance> (storage)
 				}
 			}
 		};
@@ -583,21 +597,24 @@ fn decl_store_extra_genesis(
 }
 
 fn create_and_impl_instance(
-	prefix: &str,
+	instance_prefix: &str,
 	ident: &Ident,
 	doc: &TokenStream2,
-	const_names: &[(Ident, String)],
+	const_names: &[(Ident, String, String)],
 	scrate: &TokenStream2,
 	instantiable: &Ident,
+	cratename: &Ident,
 ) -> TokenStream2 {
 	let mut const_impls = TokenStream2::new();
 
-	for (const_name, partial_const_value) in const_names {
-		let const_value = format!("{}{}", partial_const_value, prefix);
+	for (const_name, const_value_prefix, const_value_suffix) in const_names {
+		let const_value = format!("{}{}{}", const_value_prefix, instance_prefix, const_value_suffix);
 		const_impls.extend(quote! {
 			const #const_name: &'static str = #const_value;
 		});
 	}
+
+	let prefix = format!("{}{}", instance_prefix, cratename.to_string());
 
 	quote! {
 		// Those trait are derived because of wrong bounds for generics
@@ -606,6 +623,7 @@ fn create_and_impl_instance(
 		#doc
 		pub struct #ident;
 		impl #instantiable for #ident {
+			const PREFIX: &'static str = #prefix;
 			#const_impls
 		}
 	}
@@ -619,8 +637,7 @@ fn decl_storage_items(
 	cratename: &Ident,
 	storage_lines: &ext::Punctuated<DeclStorageLine, Token![;]>,
 	where_clause: &Option<WhereClause>,
-) -> TokenStream2 {
-
+) -> syn::Result<TokenStream2> {
 	let mut impls = TokenStream2::new();
 
 	let InstanceOpts {
@@ -649,15 +666,13 @@ fn decl_storage_items(
 		let const_name = syn::Ident::new(
 			&format!("{}{}", impls::PREFIX_FOR, name.to_string()), proc_macro2::Span::call_site()
 		);
-		let partial_const_value = prefix.clone();
-		const_names.push((const_name, partial_const_value));
+		const_names.push((const_name, String::new(), prefix.clone()));
 
 		if let DeclStorageTypeInfosKind::Map { is_linked: true, .. } = type_infos.kind {
 			let const_name = syn::Ident::new(
 				&format!("{}{}", impls::HEAD_KEY_FOR, name.to_string()), proc_macro2::Span::call_site()
 			);
-			let partial_const_value = format!("head of {}", prefix);
-			const_names.push((const_name, partial_const_value));
+			const_names.push((const_name, "head of ".into(), prefix));
 		}
 	}
 
@@ -668,7 +683,7 @@ fn decl_storage_items(
 	// Declare Instance trait
 	{
 		let mut const_impls = TokenStream2::new();
-		for (const_name, _) in &const_names {
+		for (const_name, ..) in &const_names {
 			const_impls.extend(quote! {
 				const #const_name: &'static str;
 			});
@@ -686,6 +701,8 @@ fn decl_storage_items(
 			/// Defines storage prefixes, they must be unique.
 			#hide
 			pub trait #instantiable: 'static {
+				/// The prefix used by any storage entry of an instance.
+				const PREFIX: &'static str;
 				#const_impls
 			}
 		});
@@ -707,9 +724,11 @@ fn decl_storage_items(
 			);
 
 		// Impl Instance trait for instances
-		for (prefix, ident, doc) in instances {
+		for (instance_prefix, ident, doc) in instances {
 			impls.extend(
-				create_and_impl_instance(&prefix, &ident, &doc, &const_names, scrate, &instantiable)
+				create_and_impl_instance(
+					&instance_prefix, &ident, &doc, &const_names, scrate, &instantiable, cratename
+				)
 			);
 		}
 	}
@@ -725,7 +744,13 @@ fn decl_storage_items(
 	} else {
 		impls.extend(
 			create_and_impl_instance(
-				"", &inherent_instance, &quote!(#[doc(hidden)]), &const_names, scrate, &instantiable
+				"",
+				&inherent_instance,
+				&quote!(#[doc(hidden)]),
+				&const_names,
+				scrate,
+				&instantiable,
+				cratename,
 			)
 		);
 	}
@@ -741,6 +766,19 @@ fn decl_storage_items(
 		} = sline;
 
 		let type_infos = get_type_infos(storage_type);
+
+		if type_infos.is_option && default_value.inner.is_some() {
+			return Err(syn::Error::new_spanned(
+				default_value,
+				"Default values for Option types are not supported"
+			));
+		}
+
+		let fielddefault = default_value.inner
+			.as_ref()
+			.map(|d| &d.expr)
+			.map(|d| quote!( #d ))
+			.unwrap_or_else(|| quote!{ Default::default() });
 		let kind = type_infos.kind.clone();
 		// Propagate doc attributes.
 		let attrs = attrs.inner.iter().filter_map(|a| a.parse_meta().ok()).filter(|m| m.name() == "doc");
@@ -753,8 +791,7 @@ fn decl_storage_items(
 			traittype,
 			instance_opts,
 			type_infos,
-			fielddefault: default_value.inner.as_ref().map(|d| &d.expr).map(|d| quote!( #d ))
-				.unwrap_or_else(|| quote!{ Default::default() }),
+			fielddefault,
 			prefix: build_prefix(cratename, name),
 			name,
 			attrs,
@@ -777,13 +814,11 @@ fn decl_storage_items(
 		};
 		impls.extend(implementation)
 	}
-	impls
+
+	Ok(impls)
 }
 
-
-fn decl_store_items(
-	storage_lines: &ext::Punctuated<DeclStorageLine, Token![;]>,
-) -> TokenStream2 {
+fn decl_store_items(storage_lines: &ext::Punctuated<DeclStorageLine, Token![;]>) -> TokenStream2 {
 	storage_lines.inner.iter().map(|sline| &sline.name)
 		.fold(TokenStream2::new(), |mut items, name| {
 		items.extend(quote!(type #name;));
@@ -868,14 +903,14 @@ fn impl_store_fns(
 					quote!{
 						#( #[ #attrs ] )*
 						pub fn #get_fn() -> #value_type {
-							<#name<#struct_trait #instance> as
-								#scrate::storage::hashed::generator::StorageValue<#typ>> :: get(
-									&#scrate::storage::RuntimeStorage
-								)
+							<
+								#name<#struct_trait #instance> as
+								#scrate::storage::StorageValue<#typ>
+							>::get()
 						}
 					}
 				},
-				DeclStorageTypeInfosKind::Map { key_type, .. } => {
+				DeclStorageTypeInfosKind::Map { key_type, is_linked, .. } => {
 					let struct_trait = if ext::type_contains_ident(&type_infos.value_type, traitinstance)
 						|| ext::type_contains_ident(key_type, traitinstance)
 					{
@@ -884,13 +919,19 @@ fn impl_store_fns(
 						quote!()
 					};
 
+					let map = if is_linked {
+						quote! { StorageLinkedMap }
+					} else {
+						quote! { StorageMap }
+					};
+
 					quote!{
 						#( #[ #attrs ] )*
-						pub fn #get_fn<K: #scrate::rstd::borrow::Borrow<#key_type>>(key: K) -> #value_type {
+						pub fn #get_fn<K: #scrate::codec::EncodeLike<#key_type>>(key: K) -> #value_type {
 							<
 								#name<#struct_trait #instance> as
-								#scrate::storage::hashed::generator::StorageMap<#key_type, #typ>
-							>::get(key.borrow(), &#scrate::storage::RuntimeStorage)
+								#scrate::storage::#map<#key_type, #typ>
+							>::get(key)
 						}
 					}
 				}
@@ -907,13 +948,13 @@ fn impl_store_fns(
 					quote!{
 						pub fn #get_fn<KArg1, KArg2>(k1: KArg1, k2: KArg2) -> #value_type
 						where
-							KArg1: #scrate::rstd::borrow::Borrow<#key1_type>,
-							KArg2: #scrate::rstd::borrow::Borrow<#key2_type>,
+							KArg1: #scrate::codec::EncodeLike<#key1_type>,
+							KArg2: #scrate::codec::EncodeLike<#key2_type>,
 						{
 							<
 								#name<#struct_trait #instance> as
-								#scrate::storage::unhashed::generator::StorageDoubleMap<#key1_type, #key2_type, #typ>
-							>::get(k1.borrow(), k2.borrow(), &#scrate::storage::RuntimeStorage)
+								#scrate::storage::StorageDoubleMap<#key1_type, #key2_type, #typ>
+							>::get(k1, k2)
 						}
 					}
 				}
@@ -931,8 +972,8 @@ fn store_functions_to_metadata (
 	instance_opts: &InstanceOpts,
 	storage_lines: &ext::Punctuated<DeclStorageLine, Token![;]>,
 	where_clause: &Option<WhereClause>,
+	cratename: &Ident,
 ) -> (TokenStream2, TokenStream2) {
-
 	let InstanceOpts {
 		comma_instance,
 		equal_default_instance,
@@ -1046,7 +1087,9 @@ fn store_functions_to_metadata (
 
 			#[cfg(feature = "std")]
 			#[allow(non_upper_case_globals)]
-			static #cache_name: #scrate::once_cell::sync::OnceCell<#scrate::rstd::vec::Vec<u8>> = #scrate::once_cell::sync::OnceCell::INIT;
+			static #cache_name: #scrate::once_cell::sync::OnceCell<
+				#scrate::rstd::vec::Vec<u8>
+			> = #scrate::once_cell::sync::OnceCell::new();
 
 			#[cfg(feature = "std")]
 			impl<#traitinstance: #traittype, #instance #bound_instantiable> #scrate::metadata::DefaultByte
@@ -1060,6 +1103,12 @@ fn store_functions_to_metadata (
 					}).clone()
 				}
 			}
+
+			unsafe impl<#traitinstance: #traittype, #instance #bound_instantiable> Send
+				for #struct_name<#traitinstance, #instance> #where_clause {}
+
+			unsafe impl<#traitinstance: #traittype, #instance #bound_instantiable> Sync
+				for #struct_name<#traitinstance, #instance> #where_clause {}
 
 			#[cfg(not(feature = "std"))]
 			impl<#traitinstance: #traittype, #instance #bound_instantiable> #scrate::metadata::DefaultByte
@@ -1075,11 +1124,14 @@ fn store_functions_to_metadata (
 
 		default_getter_struct_def.extend(def_get);
 	}
+
+	let prefix = cratename.to_string();
+	let prefix = instance.as_ref().map_or_else(|| quote!(#prefix), |i| quote!(#i::PREFIX));
+
 	(default_getter_struct_def, quote!{
-		{
-			&[
-				#items
-			]
+		#scrate::metadata::StorageMetadata {
+			prefix: #scrate::metadata::DecodeDifferent::Encode(#prefix),
+			entries: #scrate::metadata::DecodeDifferent::Encode(&[ #items ][..]),
 		}
 	})
 }

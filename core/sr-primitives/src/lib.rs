@@ -17,7 +17,6 @@
 //! Runtime Modules shared primitive types.
 
 #![warn(missing_docs)]
-
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[doc(hidden)]
@@ -31,43 +30,50 @@ pub use rstd;
 #[doc(hidden)]
 pub use paste;
 
+#[doc(hidden)]
+pub use app_crypto;
+
 #[cfg(feature = "std")]
 pub use runtime_io::{StorageOverlay, ChildrenStorageOverlay};
 
-use rstd::{prelude::*, ops};
-use substrate_primitives::{crypto, ed25519, sr25519, hash::{H256, H512}};
+use rstd::prelude::*;
+use rstd::convert::TryFrom;
+use primitives::{crypto, ed25519, sr25519, hash::{H256, H512}};
 use codec::{Encode, Decode};
 
 #[cfg(feature = "std")]
 pub mod testing;
 
-pub mod weights;
-pub mod traits;
-use traits::{SaturatedConversion, UniqueSaturatedInto};
-
+pub mod curve;
 pub mod generic;
+pub mod offchain;
+pub mod sr_arithmetic;
+pub mod traits;
 pub mod transaction_validity;
+pub mod weights;
 
 /// Re-export these since they're only "kind of" generic.
 pub use generic::{DigestItem, Digest};
 
 /// Re-export this since it's part of the API of this crate.
-pub use substrate_primitives::crypto::{key_types, KeyTypeId};
+pub use primitives::{TypeId, crypto::{key_types, KeyTypeId, CryptoType}};
+pub use app_crypto::RuntimeAppPublic;
 
-/// A message indicating an invalid signature in extrinsic.
-pub const BAD_SIGNATURE: &str = "bad signature in extrinsic";
+/// Re-export arithmetic stuff.
+pub use sr_arithmetic::{
+	Perquintill, Perbill, Permill, Percent,
+	Rational128, Fixed64
+};
+/// Re-export 128 bit helpers from sr_arithmetic
+pub use sr_arithmetic::helpers_128bit;
 
-/// Full block error message.
+/// An abstraction over justification for a block's validity under a consensus algorithm.
 ///
-/// This allows modules to indicate that given transaction is potentially valid
-/// in the future, but can't be executed in the current state.
-/// Note this error should be returned early in the execution to prevent DoS,
-/// cause the fees are not being paid if this error is returned.
-///
-/// Example: block gas limit is reached (the transaction can be retried in the next block though).
-pub const BLOCK_FULL: &str = "block size limit is reached";
-
-/// Justification type.
+/// Essentially a finality proof. The exact formulation will vary between consensus
+/// algorithms. In the case where there are multiple valid proofs, inclusion within
+/// the block itself would allow swapping justifications to change the block's hash
+/// (and thus fork the chain). Sending a `Justification` alongside a block instead
+/// bypasses this problem.
 pub type Justification = Vec<u8>;
 
 use traits::{Verify, Lazy};
@@ -76,7 +82,7 @@ use traits::{Verify, Lazy};
 #[derive(Clone, Copy, Eq, PartialEq, Encode, Decode)]
 pub struct ModuleId(pub [u8; 8]);
 
-impl traits::TypeId for ModuleId {
+impl TypeId for ModuleId {
 	const TYPE_ID: [u8; 4] = *b"modl";
 }
 
@@ -109,16 +115,14 @@ pub use serde::{Serialize, Deserialize, de::DeserializeOwned};
 pub trait BuildStorage: Sized {
 	/// Build the storage out of this builder.
 	fn build_storage(self) -> Result<(StorageOverlay, ChildrenStorageOverlay), String> {
-		let mut storage = Default::default();
-		let mut child_storage = Default::default();
-		self.assimilate_storage(&mut storage, &mut child_storage)?;
-		Ok((storage, child_storage))
+		let mut storage = (Default::default(), Default::default());
+		self.assimilate_storage(&mut storage)?;
+		Ok(storage)
 	}
 	/// Assimilate the storage for this module into pre-existing overlays.
 	fn assimilate_storage(
 		self,
-		storage: &mut StorageOverlay,
-		child_storage: &mut ChildrenStorageOverlay
+		storage: &mut (StorageOverlay, ChildrenStorageOverlay),
 	) -> Result<(), String>;
 }
 
@@ -128,24 +132,8 @@ pub trait BuildModuleGenesisStorage<T, I>: Sized {
 	/// Create the module genesis storage into the given `storage` and `child_storage`.
 	fn build_module_genesis_storage(
 		self,
-		storage: &mut StorageOverlay,
-		child_storage: &mut ChildrenStorageOverlay
+		storage: &mut (StorageOverlay, ChildrenStorageOverlay),
 	) -> Result<(), String>;
-}
-
-#[cfg(feature = "std")]
-impl BuildStorage for StorageOverlay {
-	fn build_storage(self) -> Result<(StorageOverlay, ChildrenStorageOverlay), String> {
-		Ok((self, Default::default()))
-	}
-	fn assimilate_storage(
-		self,
-		storage: &mut StorageOverlay,
-		_child_storage: &mut ChildrenStorageOverlay
-	) -> Result<(), String> {
-		storage.extend(self);
-		Ok(())
-	}
 }
 
 #[cfg(feature = "std")]
@@ -155,275 +143,22 @@ impl BuildStorage for (StorageOverlay, ChildrenStorageOverlay) {
 	}
 	fn assimilate_storage(
 		self,
-		storage: &mut StorageOverlay,
-		child_storage: &mut ChildrenStorageOverlay
+		storage: &mut (StorageOverlay, ChildrenStorageOverlay),
 	)-> Result<(), String> {
-		storage.extend(self.0);
-		child_storage.extend(self.1);
+		storage.0.extend(self.0);
+		for (k, other_map) in self.1.into_iter() {
+			if let Some(map) = storage.1.get_mut(&k) {
+				map.extend(other_map);
+			} else {
+				storage.1.insert(k, other_map);
+			}
+		}
 		Ok(())
 	}
 }
 
 /// Consensus engine unique ID.
 pub type ConsensusEngineId = [u8; 4];
-
-/// Permill is parts-per-million (i.e. after multiplying by this, divide by 1000000).
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Debug))]
-#[derive(Encode, Decode, Default, Copy, Clone, PartialEq, Eq)]
-pub struct Permill(u32);
-
-impl Permill {
-	/// Nothing.
-	pub fn zero() -> Self { Self(0) }
-
-	/// `true` if this is nothing.
-	pub fn is_zero(&self) -> bool { self.0 == 0 }
-
-	/// Everything.
-	pub fn one() -> Self { Self(1_000_000) }
-
-	/// From an explicitly defined number of parts per maximum of the type.
-	pub fn from_parts(x: u32) -> Self { Self(x.min(1_000_000)) }
-
-	/// Converts from a percent. Equal to `x / 100`.
-	pub fn from_percent(x: u32) -> Self { Self(x.min(100) * 10_000) }
-
-	/// Converts a fraction into `Permill`.
-	#[cfg(feature = "std")]
-	pub fn from_fraction(x: f64) -> Self { Self((x * 1_000_000.0) as u32) }
-
-	/// Approximate the fraction `p/q` into a per million fraction
-	pub fn from_rational_approximation<N>(p: N, q: N) -> Self
-		where N: traits::SimpleArithmetic + Clone
-	{
-		let p = p.min(q.clone());
-		let factor = (q.clone() / 1_000_000u32.into()).max(1u32.into());
-
-		// Conversion can't overflow as p < q so ( p / (q/million)) < million
-		let p_reduce: u32 = (p / factor.clone()).try_into().unwrap_or_else(|_| panic!());
-		let q_reduce: u32 = (q / factor.clone()).try_into().unwrap_or_else(|_| panic!());
-		let part = p_reduce as u64 * 1_000_000u64 / q_reduce as u64;
-
-		Permill(part as u32)
-	}
-}
-
-impl<N> ops::Mul<N> for Permill
-where
-	N: Clone + From<u32> + UniqueSaturatedInto<u32> + ops::Rem<N, Output=N>
-		+ ops::Div<N, Output=N> + ops::Mul<N, Output=N> + ops::Add<N, Output=N>,
-{
-	type Output = N;
-	fn mul(self, b: N) -> Self::Output {
-		let million: N = 1_000_000.into();
-		let part: N = self.0.into();
-
-		let rem_multiplied_divided = {
-			let rem = b.clone().rem(million.clone());
-
-			// `rem` is inferior to one million, thus it fits into u32
-			let rem_u32 = rem.saturated_into::<u32>();
-
-			// `self` and `rem` are inferior to one million, thus the product is less than 10^12
-			// and fits into u64
-			let rem_multiplied_u64 = rem_u32 as u64 * self.0 as u64;
-
-			// `rem_multiplied_u64` is less than 10^12 therefore divided by a million it fits into
-			// u32
-			let rem_multiplied_divided_u32 = (rem_multiplied_u64 / 1_000_000) as u32;
-
-			// `rem_multiplied_divided` is inferior to b, thus it can be converted back to N type
-			rem_multiplied_divided_u32.into()
-		};
-
-		(b / million) * part + rem_multiplied_divided
-	}
-}
-
-#[cfg(feature = "std")]
-impl From<f64> for Permill {
-	fn from(x: f64) -> Permill {
-		Permill::from_fraction(x)
-	}
-}
-
-#[cfg(feature = "std")]
-impl From<f32> for Permill {
-	fn from(x: f32) -> Permill {
-		Permill::from_fraction(x as f64)
-	}
-}
-
-impl codec::CompactAs for Permill {
-	type As = u32;
-	fn encode_as(&self) -> &u32 {
-		&self.0
-	}
-	fn decode_from(x: u32) -> Permill {
-		Permill(x)
-	}
-}
-
-impl From<codec::Compact<Permill>> for Permill {
-	fn from(x: codec::Compact<Permill>) -> Permill {
-		x.0
-	}
-}
-
-/// Perbill is parts-per-billion. It stores a value between 0 and 1 in fixed point and
-/// provides a means to multiply some other value by that.
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Debug))]
-#[derive(Encode, Decode, Default, Copy, Clone, PartialEq, Eq)]
-pub struct Perbill(u32);
-
-impl Perbill {
-	/// Nothing.
-	pub fn zero() -> Self { Self(0) }
-
-	/// `true` if this is nothing.
-	pub fn is_zero(&self) -> bool { self.0 == 0 }
-
-	/// Everything.
-	pub fn one() -> Self { Self(1_000_000_000) }
-
-	/// From an explicitly defined number of parts per maximum of the type.
-	pub fn from_parts(x: u32) -> Self { Self(x.min(1_000_000_000)) }
-
-	/// Converts from a percent. Equal to `x / 100`.
-	pub fn from_percent(x: u32) -> Self { Self(x.min(100) * 10_000_000) }
-
-	/// Construct new instance where `x` is in millionths. Value equivalent to `x / 1,000,000`.
-	pub fn from_millionths(x: u32) -> Self { Self(x.min(1_000_000) * 1000) }
-
-	#[cfg(feature = "std")]
-	/// Construct new instance whose value is equal to `x` (between 0 and 1).
-	pub fn from_fraction(x: f64) -> Self { Self((x.max(0.0).min(1.0) * 1_000_000_000.0) as u32) }
-
-	/// Approximate the fraction `p/q` into a per billion fraction
-	pub fn from_rational_approximation<N>(p: N, q: N) -> Self
-		where N: traits::SimpleArithmetic + Clone
-	{
-		let p = p.min(q.clone());
-		let factor = (q.clone() / 1_000_000_000u32.into()).max(1u32.into());
-
-		// Conversion can't overflow as p < q so ( p / (q/billion)) < billion
-		let p_reduce: u32 = (p / factor.clone()).try_into().unwrap_or_else(|_| panic!());
-		let q_reduce: u32 = (q / factor.clone()).try_into().unwrap_or_else(|_| panic!());
-		let part = p_reduce as u64 * 1_000_000_000u64 / q_reduce as u64;
-
-		Perbill(part as u32)
-	}
-}
-
-impl<N> ops::Mul<N> for Perbill
-where
-	N: Clone + From<u32> + UniqueSaturatedInto<u32> + ops::Rem<N, Output=N>
-	+ ops::Div<N, Output=N> + ops::Mul<N, Output=N> + ops::Add<N, Output=N>,
-{
-	type Output = N;
-	fn mul(self, b: N) -> Self::Output {
-		let billion: N = 1_000_000_000.into();
-		let part: N = self.0.into();
-
-		let rem_multiplied_divided = {
-			let rem = b.clone().rem(billion.clone());
-
-			// `rem` is inferior to one billion, thus it fits into u32
-			let rem_u32 = rem.saturated_into::<u32>();
-
-			// `self` and `rem` are inferior to one billion, thus the product is less than 10^18
-			// and fits into u64
-			let rem_multiplied_u64 = rem_u32 as u64 * self.0 as u64;
-
-			// `rem_multiplied_u64` is less than 10^18 therefore divided by a billion it fits into
-			// u32
-			let rem_multiplied_divided_u32 = (rem_multiplied_u64 / 1_000_000_000) as u32;
-
-			// `rem_multiplied_divided` is inferior to b, thus it can be converted back to N type
-			rem_multiplied_divided_u32.into()
-		};
-
-		(b / billion) * part + rem_multiplied_divided
-	}
-}
-
-#[cfg(feature = "std")]
-impl From<f64> for Perbill {
-	fn from(x: f64) -> Perbill {
-		Perbill::from_fraction(x)
-	}
-}
-
-#[cfg(feature = "std")]
-impl From<f32> for Perbill {
-	fn from(x: f32) -> Perbill {
-		Perbill::from_fraction(x as f64)
-	}
-}
-
-impl codec::CompactAs for Perbill {
-	type As = u32;
-	fn encode_as(&self) -> &u32 {
-		&self.0
-	}
-	fn decode_from(x: u32) -> Perbill {
-		Perbill(x)
-	}
-}
-
-impl From<codec::Compact<Perbill>> for Perbill {
-	fn from(x: codec::Compact<Perbill>) -> Perbill {
-		x.0
-	}
-}
-
-/// PerU128 is parts-per-u128-max-value. It stores a value between 0 and 1 in fixed point.
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Debug))]
-#[derive(Encode, Decode, Default, Copy, Clone, PartialEq, Eq)]
-pub struct PerU128(u128);
-
-const U128: u128 = u128::max_value();
-
-impl PerU128 {
-	/// Nothing.
-	pub fn zero() -> Self { Self(0) }
-
-	/// `true` if this is nothing.
-	pub fn is_zero(&self) -> bool { self.0 == 0 }
-
-	/// Everything.
-	pub fn one() -> Self { Self(U128) }
-
-	/// From an explicitly defined number of parts per maximum of the type.
-	pub fn from_parts(x: u128) -> Self { Self(x) }
-
-	/// Construct new instance where `x` is denominator and the nominator is 1.
-	pub fn from_xth(x: u128) -> Self { Self(U128/x.max(1)) }
-}
-
-impl ::rstd::ops::Deref for PerU128 {
-	type Target = u128;
-
-	fn deref(&self) -> &u128 {
-		&self.0
-	}
-}
-
-impl codec::CompactAs for PerU128 {
-	type As = u128;
-	fn encode_as(&self) -> &u128 {
-		&self.0
-	}
-	fn decode_from(x: u128) -> PerU128 {
-		Self(x)
-	}
-}
-
-impl From<codec::Compact<PerU128>> for PerU128 {
-	fn from(x: codec::Compact<PerU128>) -> PerU128 {
-		x.0
-	}
-}
 
 /// Signature verify that can work with any known signature types..
 #[derive(Eq, PartialEq, Clone, Encode, Decode)]
@@ -527,8 +262,13 @@ pub struct AnySignature(H512);
 impl Verify for AnySignature {
 	type Signer = sr25519::Public;
 	fn verify<L: Lazy<[u8]>>(&self, mut msg: L, signer: &sr25519::Public) -> bool {
-		runtime_io::sr25519_verify(self.0.as_fixed_bytes(), msg.get(), &signer.0) ||
-			runtime_io::ed25519_verify(self.0.as_fixed_bytes(), msg.get(), &signer.0)
+		sr25519::Signature::try_from(self.0.as_fixed_bytes().as_ref())
+			.map(|s| runtime_io::sr25519_verify(&s, msg.get(), &signer))
+			.unwrap_or(false)
+		|| ed25519::Signature::try_from(self.0.as_fixed_bytes().as_ref())
+			.and_then(|s| ed25519::Public::try_from(signer.0.as_ref()).map(|p| (s, p)))
+			.map(|(s, p)| runtime_io::ed25519_verify(&s, msg.get(), &p))
+			.unwrap_or(false)
 	}
 }
 
@@ -544,48 +284,110 @@ impl From<ed25519::Signature> for AnySignature {
 	}
 }
 
-#[derive(Eq, PartialEq, Clone, Copy, Decode)]
+#[derive(Eq, PartialEq, Clone, Copy, Decode, Encode)]
 #[cfg_attr(feature = "std", derive(Debug, Serialize))]
-#[repr(u8)]
-/// Outcome of a valid extrinsic application. Capable of being sliced.
-pub enum ApplyOutcome {
-	/// Successful application (extrinsic reported no issue).
-	Success = 0,
-	/// Failed application (extrinsic was probably a no-op other than fees).
-	Fail = 1,
+/// Reason why an extrinsic couldn't be applied (i.e. invalid extrinsic).
+pub enum ApplyError {
+	/// General error to do with the permissions of the sender.
+	NoPermission,
+
+	/// General error to do with the state of the system in general.
+	BadState,
+
+	/// Any error to do with the transaction validity.
+	Validity(transaction_validity::TransactionValidityError),
 }
 
-impl codec::Encode for ApplyOutcome {
-	fn using_encoded<R, F: FnOnce(&[u8]) -> R>(&self, f: F) -> R {
-		f(&[*self as u8])
+impl ApplyError {
+	/// Returns if the reason for the error was block resource exhaustion.
+	pub fn exhausted_resources(&self) -> bool {
+		match self {
+			Self::Validity(e) => e.exhausted_resources(),
+			_ => false,
+		}
 	}
 }
 
-#[derive(Eq, PartialEq, Clone, Copy, Decode)]
-#[cfg_attr(feature = "std", derive(Debug, Serialize))]
-#[repr(u8)]
-/// Reason why an extrinsic couldn't be applied (i.e. invalid extrinsic).
-pub enum ApplyError {
-	/// Bad signature.
-	BadSignature = 0,
-	/// Nonce too low.
-	Stale = 1,
-	/// Nonce too high.
-	Future = 2,
-	/// Sending account had too low a balance.
-	CantPay = 3,
-	/// Block is full, no more extrinsics can be applied.
-	FullBlock = 255,
+impl From<ApplyError> for &'static str {
+	fn from(err: ApplyError) -> &'static str {
+		match err {
+			ApplyError::NoPermission => "Transaction does not have required permissions",
+			ApplyError::BadState => "System state currently prevents this transaction",
+			ApplyError::Validity(v) => v.into(),
+		}
+	}
 }
 
-impl codec::Encode for ApplyError {
-	fn using_encoded<R, F: FnOnce(&[u8]) -> R>(&self, f: F) -> R {
-		f(&[*self as u8])
+impl From<transaction_validity::TransactionValidityError> for ApplyError {
+	fn from(err: transaction_validity::TransactionValidityError) -> Self {
+		ApplyError::Validity(err)
+	}
+}
+
+/// The outcome of applying a transaction.
+pub type ApplyOutcome = Result<(), DispatchError>;
+
+impl From<DispatchError> for ApplyOutcome {
+	fn from(err: DispatchError) -> Self {
+		Err(err)
 	}
 }
 
 /// Result from attempt to apply an extrinsic.
 pub type ApplyResult = Result<ApplyOutcome, ApplyError>;
+
+#[derive(Eq, PartialEq, Clone, Copy, Encode, Decode)]
+#[cfg_attr(feature = "std", derive(Debug, Serialize))]
+/// Reason why a dispatch call failed
+pub struct DispatchError {
+	/// Module index, matching the metadata module index
+	pub module: Option<u8>,
+	/// Module specific error value
+	pub error: u8,
+	/// Optional error message.
+	#[codec(skip)]
+	pub message: Option<&'static str>,
+}
+
+impl DispatchError {
+	/// Create a new instance of `DispatchError`.
+	pub fn new(module: Option<u8>, error: u8, message: Option<&'static str>) -> Self {
+		Self {
+			module,
+			error,
+			message,
+		}
+	}
+}
+
+impl traits::Printable for DispatchError {
+	fn print(&self) {
+		"DispatchError".print();
+		if let Some(module) = self.module {
+			module.print();
+		}
+		self.error.print();
+		if let Some(msg) = self.message {
+			msg.print();
+		}
+	}
+}
+
+impl traits::ModuleDispatchError for &'static str {
+	fn as_u8(&self) -> u8 {
+		0
+	}
+
+	fn as_str(&self) -> &'static str {
+		self
+	}
+}
+
+impl From<&'static str> for DispatchError {
+	fn from(err: &'static str) -> DispatchError {
+		DispatchError::new(None, 0, Some(err))
+	}
+}
 
 /// Verify a signature on an encoded value in a lazy manner. This can be
 /// an optimization if the signature scheme has an "unsigned" escape hash.
@@ -676,8 +478,7 @@ macro_rules! impl_outer_config {
 			impl $crate::BuildStorage for $main {
 				fn assimilate_storage(
 					self,
-					top: &mut $crate::StorageOverlay,
-					children: &mut $crate::ChildrenStorageOverlay
+					storage: &mut ($crate::StorageOverlay, $crate::ChildrenStorageOverlay),
 				) -> std::result::Result<(), String> {
 					$(
 						if let Some(extra) = self.[< $snake $(_ $instance )? >] {
@@ -687,8 +488,7 @@ macro_rules! impl_outer_config {
 								$snake;
 								$( $instance )?;
 								extra;
-								top;
-								children;
+								storage;
 							}
 						}
 					)*
@@ -702,13 +502,11 @@ macro_rules! impl_outer_config {
 		$module:ident;
 		$instance:ident;
 		$extra:ident;
-		$top:ident;
-		$children:ident;
+		$storage:ident;
 	) => {
 		$crate::BuildModuleGenesisStorage::<$runtime, $module::$instance>::build_module_genesis_storage(
 			$extra,
-			$top,
-			$children,
+			$storage,
 		)?;
 	};
 	(@CALL_FN
@@ -716,15 +514,44 @@ macro_rules! impl_outer_config {
 		$module:ident;
 		;
 		$extra:ident;
-		$top:ident;
-		$children:ident;
+		$storage:ident;
 	) => {
 		$crate::BuildModuleGenesisStorage::<$runtime, $module::__InherentHiddenInstance>::build_module_genesis_storage(
 			$extra,
-			$top,
-			$children,
+			$storage,
 		)?;
 	}
+}
+
+/// Checks that `$x` is equal to `$y` with an error rate of `$error`.
+///
+/// # Example
+///
+/// ```rust
+/// # fn main() {
+/// sr_primitives::assert_eq_error_rate!(10, 10, 0);
+/// sr_primitives::assert_eq_error_rate!(10, 11, 1);
+/// sr_primitives::assert_eq_error_rate!(12, 10, 2);
+/// # }
+/// ```
+///
+/// ```rust,should_panic
+/// # fn main() {
+/// sr_primitives::assert_eq_error_rate!(12, 10, 1);
+/// # }
+/// ```
+#[macro_export]
+#[cfg(feature = "std")]
+macro_rules! assert_eq_error_rate {
+	($x:expr, $y:expr, $error:expr $(,)?) => {
+		assert!(
+			($x) >= (($y) - ($error)) && ($x) <= (($y) + ($error)),
+			"{:?} != {:?} (with error rate {:?})",
+			$x,
+			$y,
+			$error,
+		);
+	};
 }
 
 /// Simple blob to hold an extrinsic without committing to its format and ensure it is serialized
@@ -735,58 +562,40 @@ pub struct OpaqueExtrinsic(pub Vec<u8>);
 #[cfg(feature = "std")]
 impl std::fmt::Debug for OpaqueExtrinsic {
 	fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-		write!(fmt, "{}", substrate_primitives::hexdisplay::HexDisplay::from(&self.0))
+		write!(fmt, "{}", primitives::hexdisplay::HexDisplay::from(&self.0))
 	}
 }
 
 #[cfg(feature = "std")]
 impl ::serde::Serialize for OpaqueExtrinsic {
 	fn serialize<S>(&self, seq: S) -> Result<S::Ok, S::Error> where S: ::serde::Serializer {
-		codec::Encode::using_encoded(&self.0, |bytes| ::substrate_primitives::bytes::serialize(bytes, seq))
+		codec::Encode::using_encoded(&self.0, |bytes| ::primitives::bytes::serialize(bytes, seq))
+	}
+}
+
+#[cfg(feature = "std")]
+impl<'a> ::serde::Deserialize<'a> for OpaqueExtrinsic {
+	fn deserialize<D>(de: D) -> Result<Self, D::Error> where D: ::serde::Deserializer<'a> {
+		let r = ::primitives::bytes::deserialize(de)?;
+		Decode::decode(&mut &r[..])
+			.map_err(|e| ::serde::de::Error::custom(format!("Decode error: {}", e)))
 	}
 }
 
 impl traits::Extrinsic for OpaqueExtrinsic {
-	fn is_signed(&self) -> Option<bool> {
-		None
-	}
+	type Call = ();
+	type SignaturePayload = ();
+}
+
+/// Print something that implements `Printable` from the runtime.
+pub fn print(print: impl traits::Printable) {
+	print.print();
 }
 
 #[cfg(test)]
 mod tests {
-	use crate::codec::{Encode, Decode};
-
-	macro_rules! per_thing_upper_test {
-		($num_type:tt, $per:tt) => {
-			// multiplication from all sort of from_percent
-			assert_eq!($per::from_percent(100) * $num_type::max_value(), $num_type::max_value());
-			assert_eq!(
-				$per::from_percent(99) * $num_type::max_value(),
-				((Into::<U256>::into($num_type::max_value()) * 99u32) / 100u32).as_u128() as $num_type
-			);
-			assert_eq!($per::from_percent(50) * $num_type::max_value(), $num_type::max_value() / 2);
-			assert_eq!($per::from_percent(1) * $num_type::max_value(), $num_type::max_value() / 100);
-			assert_eq!($per::from_percent(0) * $num_type::max_value(), 0);
-
-			// multiplication with bounds
-			assert_eq!($per::one() * $num_type::max_value(), $num_type::max_value());
-			assert_eq!($per::zero() * $num_type::max_value(), 0);
-
-			// from_rational_approximation
-			assert_eq!(
-				$per::from_rational_approximation(u128::max_value() - 1, u128::max_value()),
-				$per::one(),
-			);
-			assert_eq!(
-				$per::from_rational_approximation(u128::max_value()/3, u128::max_value()),
-				$per::from_parts($per::one().0/3),
-			);
-			assert_eq!(
-				$per::from_rational_approximation(1, u128::max_value()),
-				$per::zero(),
-			);
-		}
-	}
+	use crate::DispatchError;
+	use codec::{Encode, Decode};
 
 	#[test]
 	fn opaque_extrinsic_serialization() {
@@ -795,76 +604,22 @@ mod tests {
 	}
 
 	#[test]
-	fn compact_permill_perbill_encoding() {
-		let tests = [(0u32, 1usize), (63, 1), (64, 2), (16383, 2), (16384, 4), (1073741823, 4), (1073741824, 5), (u32::max_value(), 5)];
-		for &(n, l) in &tests {
-			let compact: crate::codec::Compact<super::Permill> = super::Permill(n).into();
-			let encoded = compact.encode();
-			assert_eq!(encoded.len(), l);
-			let decoded = <crate::codec::Compact<super::Permill>>::decode(&mut & encoded[..]).unwrap();
-			let permill: super::Permill = decoded.into();
-			assert_eq!(permill, super::Permill(n));
-
-			let compact: crate::codec::Compact<super::Perbill> = super::Perbill(n).into();
-			let encoded = compact.encode();
-			assert_eq!(encoded.len(), l);
-			let decoded = <crate::codec::Compact<super::Perbill>>::decode(&mut & encoded[..]).unwrap();
-			let perbill: super::Perbill = decoded.into();
-			assert_eq!(perbill, super::Perbill(n));
-		}
-	}
-
-	#[derive(Encode, Decode, PartialEq, Eq, Debug)]
-	struct WithCompact<T: crate::codec::HasCompact> {
-		data: T,
-	}
-
-	#[test]
-	fn test_has_compact_permill() {
-		let data = WithCompact { data: super::Permill(1) };
-		let encoded = data.encode();
-		assert_eq!(data, WithCompact::<super::Permill>::decode(&mut &encoded[..]).unwrap());
-	}
-
-	#[test]
-	fn test_has_compact_perbill() {
-		let data = WithCompact { data: super::Perbill(1) };
-		let encoded = data.encode();
-		assert_eq!(data, WithCompact::<super::Perbill>::decode(&mut &encoded[..]).unwrap());
-	}
-
-	#[test]
-	fn per_things_should_work() {
-		use super::{Perbill, Permill};
-		use primitive_types::U256;
-
-		per_thing_upper_test!(u32, Perbill);
-		per_thing_upper_test!(u64, Perbill);
-		per_thing_upper_test!(u128, Perbill);
-
-		per_thing_upper_test!(u32, Permill);
-		per_thing_upper_test!(u64, Permill);
-		per_thing_upper_test!(u128, Permill);
-
-	}
-
-	#[test]
-	fn per_things_operate_in_output_type() {
-		assert_eq!(super::Perbill::one() * 255_u64, 255);
-	}
-
-	#[test]
-	fn per_things_one_minus_one_part() {
-		use primitive_types::U256;
-
+	fn dispatch_error_encoding() {
+		let error = DispatchError {
+			module: Some(1),
+			error: 2,
+			message: Some("error message"),
+		};
+		let encoded = error.encode();
+		let decoded = DispatchError::decode(&mut &encoded[..]).unwrap();
+		assert_eq!(encoded, vec![1, 1, 2]);
 		assert_eq!(
-			super::Perbill::from_parts(999_999_999) * std::u128::MAX,
-			((Into::<U256>::into(std::u128::MAX) * 999_999_999u32) / 1_000_000_000u32).as_u128()
-		);
-
-		assert_eq!(
-			super::Permill::from_parts(999_999) * std::u128::MAX,
-			((Into::<U256>::into(std::u128::MAX) * 999_999u32) / 1_000_000u32).as_u128()
+			decoded,
+			DispatchError {
+				module: Some(1),
+				error: 2,
+				message: None,
+			},
 		);
 	}
 }

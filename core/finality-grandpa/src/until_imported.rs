@@ -23,12 +23,13 @@
 use super::{BlockStatus, CommunicationIn, Error, SignedMessage};
 
 use log::{debug, warn};
-use client::ImportNotifications;
+use client::{BlockImportNotification, ImportNotifications};
 use futures::prelude::*;
 use futures::stream::Fuse;
+use futures03::{StreamExt as _, TryStreamExt as _};
 use grandpa::voter;
 use parking_lot::Mutex;
-use runtime_primitives::traits::{Block as BlockT, Header as HeaderT, NumberFor};
+use sr_primitives::traits::{Block as BlockT, Header as HeaderT, NumberFor};
 use tokio_timer::Interval;
 
 use std::collections::{HashMap, VecDeque};
@@ -64,12 +65,13 @@ pub(crate) trait BlockUntilImported<Block: BlockT>: Sized {
 
 /// Buffering imported messages until blocks with given hashes are imported.
 pub(crate) struct UntilImported<Block: BlockT, Status, I, M: BlockUntilImported<Block>> {
-	import_notifications: Fuse<ImportNotifications<Block>>,
+	import_notifications: Fuse<Box<dyn Stream<Item = BlockImportNotification<Block>, Error = ()> + Send>>,
 	status_check: Status,
 	inner: Fuse<I>,
 	ready: VecDeque<M::Blocked>,
 	check_pending: Interval,
 	pending: HashMap<Block::Hash, (Instant, Vec<M>)>,
+	identifier: &'static str,
 }
 
 impl<Block: BlockT, Status, I: Stream, M> UntilImported<Block, Status, I, M>
@@ -80,6 +82,7 @@ impl<Block: BlockT, Status, I: Stream, M> UntilImported<Block, Status, I, M>
 		import_notifications: ImportNotifications<Block>,
 		status_check: Status,
 		stream: I,
+		identifier: &'static str,
 	) -> Self {
 		// how often to check if pending messages that are waiting for blocks to be
 		// imported can be checked.
@@ -91,12 +94,16 @@ impl<Block: BlockT, Status, I: Stream, M> UntilImported<Block, Status, I, M>
 
 		let check_pending = Interval::new(now + CHECK_PENDING_INTERVAL, CHECK_PENDING_INTERVAL);
 		UntilImported {
-			import_notifications: import_notifications.fuse(),
+			import_notifications: {
+				let stream = import_notifications.map::<_, fn(_) -> _>(|v| Ok::<_, ()>(v)).compat();
+				Box::new(stream) as Box<dyn Stream<Item = _, Error = _> + Send>
+			}.fuse(),
 			status_check,
 			inner: stream.fuse(),
 			ready: VecDeque::new(),
 			check_pending,
 			pending: HashMap::new(),
+			identifier,
 		}
 	}
 }
@@ -166,8 +173,9 @@ impl<Block: BlockT, Status, I, M> Stream for UntilImported<Block, Status, I, M> 
 					if Instant::now() <= next_log {
 						debug!(
 							target: "afg",
-							"Waiting to import block {} before {} votes can be imported. \
+							"Waiting to import block {} before {} {} messages can be imported. \
 							Possible fork?",
+							self.identifier,
 							block_hash,
 							v.len(),
 						);
@@ -194,7 +202,6 @@ impl<Block: BlockT, Status, I, M> Stream for UntilImported<Block, Status, I, M> 
 		if self.import_notifications.is_done() && self.inner.is_done() {
 			Ok(Async::Ready(None))
 		} else {
-
 			Ok(Async::NotReady)
 		}
 	}
@@ -435,7 +442,7 @@ mod tests {
 	use consensus_common::BlockOrigin;
 	use client::BlockImportNotification;
 	use futures::future::Either;
-	use futures::sync::mpsc;
+	use futures03::channel::mpsc;
 	use grandpa::Precommit;
 
 	#[derive(Clone)]
@@ -469,6 +476,7 @@ mod tests {
 				origin: BlockOrigin::File,
 				header,
 				is_new_best: false,
+				retracted: vec![],
 			}).unwrap();
 		}
 	}
@@ -523,12 +531,13 @@ mod tests {
 		// enact all dependencies before importing the message
 		enact_dependencies(&chain_state);
 
-		let (global_tx, global_rx) = mpsc::unbounded();
+		let (global_tx, global_rx) = futures::sync::mpsc::unbounded();
 
 		let until_imported = UntilGlobalMessageBlocksImported::new(
 			import_notifications,
 			block_status,
 			global_rx.map_err(|_| panic!("should never error")),
+			"global",
 		);
 
 		global_tx.unbounded_send(msg).unwrap();
@@ -548,12 +557,13 @@ mod tests {
 		let (chain_state, import_notifications) = TestChainState::new();
 		let block_status = chain_state.block_status();
 
-		let (global_tx, global_rx) = mpsc::unbounded();
+		let (global_tx, global_rx) = futures::sync::mpsc::unbounded();
 
 		let until_imported = UntilGlobalMessageBlocksImported::new(
 			import_notifications,
 			block_status,
 			global_rx.map_err(|_| panic!("should never error")),
+			"global",
 		);
 
 		global_tx.unbounded_send(msg).unwrap();

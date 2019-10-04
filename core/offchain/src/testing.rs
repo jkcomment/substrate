@@ -28,9 +28,8 @@ use primitives::offchain::{
 	HttpRequestId as RequestId,
 	HttpRequestStatus as RequestStatus,
 	Timestamp,
-	CryptoKind,
-	CryptoKeyId,
 	StorageKind,
+	OpaqueNetworkState,
 };
 
 /// Pending request.
@@ -49,7 +48,7 @@ pub struct PendingRequest {
 	/// Has the request been sent already.
 	pub sent: bool,
 	/// Response body
-	pub response: Vec<u8>,
+	pub response: Option<Vec<u8>>,
 	/// Number of bytes already read from the response body.
 	pub read: usize,
 	/// Response headers
@@ -68,6 +67,8 @@ pub struct State {
 	pub persistent_storage: client::in_mem::OffchainStorage,
 	/// Local storage
 	pub local_storage: client::in_mem::OffchainStorage,
+	/// A vector of transactions submitted from the runtime.
+	pub transactions: Vec<Vec<u8>>,
 }
 
 impl State {
@@ -88,7 +89,7 @@ impl State {
 					*req,
 					expected,
 				);
-				req.response = response.into();
+				req.response = Some(response.into());
 				req.response_headers = response_headers.into_iter().collect();
 			}
 		}
@@ -96,7 +97,7 @@ impl State {
 
 	fn fulfill_expected(&mut self, id: u16) {
 		if let Some(mut req) = self.expected_requests.remove(&RequestId(id)) {
-			let response = std::mem::replace(&mut req.response, vec![]);
+			let response = req.response.take().expect("Response checked while added.");
 			let headers = std::mem::replace(&mut req.response_headers, vec![]);
 			self.fulfill_pending_request(id, req, response, headers);
 		}
@@ -109,6 +110,9 @@ impl State {
 	/// Expected request has to be fulfilled before this struct is dropped,
 	/// the `response` and `response_headers` fields will be used to return results to the callers.
 	pub fn expect_request(&mut self, id: u16, expected: PendingRequest) {
+		if expected.response.is_none() {
+			panic!("Expected request needs to have a response.");
+		}
 		self.expected_requests.insert(RequestId(id), expected);
 	}
 }
@@ -135,28 +139,21 @@ impl TestOffchainExt {
 }
 
 impl offchain::Externalities for TestOffchainExt {
-	fn submit_transaction(&mut self, _ex: Vec<u8>) -> Result<(), ()> {
+	fn is_validator(&self) -> bool {
 		unimplemented!("not needed in tests so far")
 	}
 
-	fn new_crypto_key(&mut self, _crypto: CryptoKind) -> Result<CryptoKeyId, ()> {
-		unimplemented!("not needed in tests so far")
+	fn submit_transaction(&mut self, ex: Vec<u8>) -> Result<(), ()> {
+		let mut state = self.0.write();
+		state.transactions.push(ex);
+		Ok(())
 	}
 
-	fn encrypt(&mut self, _key: Option<CryptoKeyId>, _data: &[u8]) -> Result<Vec<u8>, ()> {
-		unimplemented!("not needed in tests so far")
-	}
-
-	fn decrypt(&mut self, _key: Option<CryptoKeyId>, _data: &[u8]) -> Result<Vec<u8>, ()> {
-		unimplemented!("not needed in tests so far")
-	}
-
-	fn sign(&mut self, _key: Option<CryptoKeyId>, _data: &[u8]) -> Result<Vec<u8>, ()> {
-		unimplemented!("not needed in tests so far")
-	}
-
-	fn verify(&mut self, _key: Option<CryptoKeyId>, _msg: &[u8], _signature: &[u8]) -> Result<bool, ()> {
-		unimplemented!("not needed in tests so far")
+	fn network_state(&self) -> Result<OpaqueNetworkState, ()> {
+		Ok(OpaqueNetworkState {
+			peer_id: Default::default(),
+			external_addresses: vec![],
+		})
 	}
 
 	fn timestamp(&mut self) -> Timestamp {
@@ -183,7 +180,7 @@ impl offchain::Externalities for TestOffchainExt {
 		&mut self,
 		kind: StorageKind,
 		key: &[u8],
-		old_value: &[u8],
+		old_value: Option<&[u8]>,
 		new_value: &[u8]
 	) -> bool {
 		let mut state = self.0.write();
@@ -260,8 +257,9 @@ impl offchain::Externalities for TestOffchainExt {
 		let state = self.0.read();
 
 		ids.iter().map(|id| match state.requests.get(id) {
-			Some(req) if req.response.is_empty() => RequestStatus::DeadlineReached,
-			None => RequestStatus::Unknown,
+			Some(req) if req.response.is_none() =>
+				panic!("No `response` provided for request with id: {:?}", id),
+			None => RequestStatus::Invalid,
 			_ => RequestStatus::Finished(200),
 		}).collect()
 	}
@@ -287,13 +285,17 @@ impl offchain::Externalities for TestOffchainExt {
 	) -> Result<usize, HttpError> {
 		let mut state = self.0.write();
 		if let Some(req) = state.requests.get_mut(&request_id) {
-			if req.read >= req.response.len() {
+			let response = req.response
+				.as_mut()
+				.expect(&format!("No response provided for request: {:?}", request_id));
+
+			if req.read >= response.len() {
 				// Remove the pending request as per spec.
 				state.requests.remove(&request_id);
 				Ok(0)
 			} else {
-				let read = std::cmp::min(buffer.len(), req.response[req.read..].len());
-				buffer[0..read].copy_from_slice(&req.response[req.read..read]);
+				let read = std::cmp::min(buffer.len(), response[req.read..].len());
+				buffer[0..read].copy_from_slice(&response[req.read..read]);
 				req.read += read;
 				Ok(read)
 			}
@@ -302,4 +304,3 @@ impl offchain::Externalities for TestOffchainExt {
 		}
 	}
 }
-

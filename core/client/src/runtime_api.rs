@@ -23,7 +23,7 @@ pub use state_machine::OverlayedChanges;
 #[cfg(feature = "std")]
 pub use primitives::NativeOrEncoded;
 #[doc(hidden)]
-pub use runtime_primitives::{
+pub use sr_primitives::{
 	traits::{
 		Block as BlockT, GetNodeBlockType, GetRuntimeBlockType,
 		Header as HeaderT, ApiRef, RuntimeApiInfo, Hash as HashT,
@@ -39,7 +39,7 @@ pub use rstd::{slice, mem};
 #[cfg(feature = "std")]
 use rstd::result;
 #[doc(hidden)]
-pub use parity_codec::{Encode, Decode};
+pub use codec::{Encode, Decode};
 #[cfg(feature = "std")]
 use crate::error;
 use sr_api_macros::decl_runtime_apis;
@@ -136,7 +136,7 @@ pub trait CallRuntimeAt<Block: BlockT> {
 	fn call_api_at<
 		'a,
 		R: Encode + Decode + PartialEq,
-		NC: FnOnce() -> result::Result<R, &'static str> + UnwindSafe,
+		NC: FnOnce() -> result::Result<R, String> + UnwindSafe,
 		C: Core<Block>,
 	>(
 		&self,

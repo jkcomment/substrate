@@ -17,8 +17,8 @@
 //! Network packet message types. These get serialized and put into the lower level protocol payload.
 
 use bitflags::bitflags;
-use runtime_primitives::{ConsensusEngineId, traits::{Block as BlockT, Header as HeaderT}};
-use parity_codec::{Encode, Decode, Input, Output};
+use sr_primitives::{ConsensusEngineId, traits::{Block as BlockT, Header as HeaderT}};
+use codec::{Encode, Decode, Input, Output, Error};
 pub use self::generic::{
 	BlockAnnounce, RemoteCallRequest, RemoteReadRequest,
 	RemoteHeaderRequest, RemoteHeaderResponse,
@@ -90,9 +90,11 @@ impl Encode for BlockAttributes {
 	}
 }
 
+impl codec::EncodeLike for BlockAttributes {}
+
 impl Decode for BlockAttributes {
-	fn decode<I: Input>(input: &mut I) -> Option<Self> {
-		Self::from_bits(input.read_byte()?)
+	fn decode<I: Input>(input: &mut I) -> Result<Self, Error> {
+		Self::from_bits(input.read_byte()?).ok_or_else(|| Error::from("Invalid bytes"))
 	}
 }
 
@@ -103,6 +105,15 @@ pub enum Direction {
 	Ascending = 0,
 	/// Enumerate in descendfing order (from parent to canonical child).
 	Descending = 1,
+}
+
+/// Block state in the chain.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Encode, Decode)]
+pub enum BlockState {
+	/// Block is not part of the best chain.
+	Normal,
+	/// Latest best block.
+	Best,
 }
 
 /// Remote call response.
@@ -125,13 +136,13 @@ pub struct RemoteReadResponse {
 
 /// Generic types.
 pub mod generic {
-	use crate::custom_proto::CustomMessage;
-	use parity_codec::{Encode, Decode};
-	use runtime_primitives::Justification;
+	use codec::{Encode, Decode, Input, Output};
+	use sr_primitives::Justification;
 	use crate::config::Roles;
 	use super::{
 		RemoteReadResponse, Transactions, Direction,
 		RequestId, BlockAttributes, RemoteCallResponse, ConsensusEngineId,
+		BlockState,
 	};
 	/// Consensus is mostly opaque to us
 	#[derive(Debug, PartialEq, Eq, Clone, Encode, Decode)]
@@ -210,18 +221,6 @@ pub mod generic {
 		ChainSpecific(Vec<u8>),
 	}
 
-	impl<Header, Hash, Number, Extrinsic> CustomMessage for Message<Header, Hash, Number, Extrinsic>
-		where Self: Decode + Encode
-	{
-		fn into_bytes(self) -> Vec<u8> {
-			self.encode()
-		}
-
-		fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
-			Decode::decode(&mut &bytes[..]).ok_or(())
-		}
-	}
-
 	/// Status sent on connection.
 	#[derive(Debug, PartialEq, Eq, Clone, Encode, Decode)]
 	pub struct Status<Hash, Number> {
@@ -268,10 +267,42 @@ pub mod generic {
 	}
 
 	/// Announce a new complete relay chain block on the network.
-	#[derive(Debug, PartialEq, Eq, Clone, Encode, Decode)]
+	#[derive(Debug, PartialEq, Eq, Clone)]
 	pub struct BlockAnnounce<H> {
 		/// New block header.
 		pub header: H,
+		/// Block state. TODO: Remove `Option` and custom encoding when v4 becomes common.
+		pub state: Option<BlockState>,
+		/// Data associated with this block announcement, e.g. a candidate message.
+		pub data: Option<Vec<u8>>,
+	}
+
+	// Custom Encode/Decode impl to maintain backwards compatibility with v3.
+	// This assumes that the packet contains nothing but the announcement message.
+	// TODO: Get rid of it once protocol v4 is common.
+	impl<H: Encode> Encode for BlockAnnounce<H> {
+		fn encode_to<T: Output>(&self, dest: &mut T) {
+			self.header.encode_to(dest);
+			if let Some(state) = &self.state {
+				state.encode_to(dest);
+			}
+			if let Some(data) = &self.data {
+				data.encode_to(dest)
+			}
+		}
+	}
+
+	impl<H: Decode> Decode for BlockAnnounce<H> {
+		fn decode<I: Input>(input: &mut I) -> Result<Self, codec::Error> {
+			let header = H::decode(input)?;
+			let state = BlockState::decode(input).ok();
+			let data = Vec::decode(input).ok();
+			Ok(BlockAnnounce {
+				header,
+				state,
+				data,
+			})
+		}
 	}
 
 	#[derive(Debug, PartialEq, Eq, Clone, Encode, Decode)]
@@ -295,7 +326,7 @@ pub mod generic {
 		/// Block at which to perform call.
 		pub block: H,
 		/// Storage key.
-		pub key: Vec<u8>,
+		pub keys: Vec<Vec<u8>>,
 	}
 
 	#[derive(Debug, PartialEq, Eq, Clone, Encode, Decode)]
@@ -308,7 +339,7 @@ pub mod generic {
 		/// Child Storage key.
 		pub storage_key: Vec<u8>,
 		/// Storage key.
-		pub key: Vec<u8>,
+		pub keys: Vec<Vec<u8>>,
 	}
 
 	#[derive(Debug, PartialEq, Eq, Clone, Encode, Decode)]
@@ -345,6 +376,8 @@ pub mod generic {
 		pub min: H,
 		/// Hash of the last block that we can use when querying changes.
 		pub max: H,
+		/// Storage child node key which changes are requested.
+		pub storage_key: Option<Vec<u8>>,
 		/// Storage key which changes are requested.
 		pub key: Vec<u8>,
 	}

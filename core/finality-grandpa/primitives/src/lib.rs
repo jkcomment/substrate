@@ -23,20 +23,25 @@ extern crate alloc;
 
 #[cfg(feature = "std")]
 use serde::Serialize;
-use parity_codec::{Encode, Decode, Codec};
-use sr_primitives::{ConsensusEngineId, traits::{DigestFor, NumberFor}};
+use codec::{Encode, Decode, Codec};
+use sr_primitives::ConsensusEngineId;
 use client::decl_runtime_apis;
 use rstd::vec::Vec;
 
+mod app {
+	use app_crypto::{app_crypto, key_types::GRANDPA, ed25519};
+	app_crypto!(ed25519, GRANDPA);
+}
+
 /// The grandpa crypto scheme defined via the keypair type.
 #[cfg(feature = "std")]
-pub type AuthorityPair = substrate_primitives::ed25519::Pair;
+pub type AuthorityPair = app::Pair;
 
 /// Identity of a Grandpa authority.
-pub type AuthorityId = substrate_primitives::ed25519::Public;
+pub type AuthorityId = app::Public;
 
 /// Signature for a Grandpa authority.
-pub type AuthoritySignature = substrate_primitives::ed25519::Signature;
+pub type AuthoritySignature = app::Signature;
 
 /// The `ConsensusEngineId` of GRANDPA.
 pub const GRANDPA_ENGINE_ID: ConsensusEngineId = *b"FRNK";
@@ -46,6 +51,12 @@ pub type AuthorityWeight = u64;
 
 /// The index of an authority.
 pub type AuthorityIndex = u64;
+
+/// The identifier of a GRANDPA set.
+pub type SetId = u64;
+
+/// The round indicator.
+pub type RoundNumber = u64;
 
 /// A scheduled change of authority set.
 #[cfg_attr(feature = "std", derive(Debug, Serialize))]
@@ -63,8 +74,9 @@ pub struct ScheduledChange<N> {
 pub enum ConsensusLog<N: Codec> {
 	/// Schedule an authority set change.
 	///
-	/// Precedence towards earlier or later digest items can be given
-	/// based on the rules of the chain.
+	/// The earliest digest of this type in a single block will be respected,
+	/// provided that there is no `ForcedChange` digest. If there is, then the
+	/// `ForcedChange` will take precedence.
 	///
 	/// No change should be scheduled if one is already and the delay has not
 	/// passed completely.
@@ -79,8 +91,8 @@ pub enum ConsensusLog<N: Codec> {
 	/// Forced changes are applied after a delay of _imported_ blocks,
 	/// while pending changes are applied after a delay of _finalized_ blocks.
 	///
-	/// Precedence towards earlier or later digest items can be given
-	/// based on the rules of the chain.
+	/// The earliest digest of this type in a single block will be respected,
+	/// with others ignored.
 	///
 	/// No change should be scheduled if one is already and the delay has not
 	/// passed completely.
@@ -93,6 +105,14 @@ pub enum ConsensusLog<N: Codec> {
 	/// Note that the authority with given index is disabled until the next change.
 	#[codec(index = "3")]
 	OnDisabled(AuthorityIndex),
+	/// A signal to pause the current authority set after the given delay.
+	/// After finalizing the block at _delay_ the authorities should stop voting.
+	#[codec(index = "4")]
+	Pause(N),
+	/// A signal to resume the current authority set after the given delay.
+	/// After authoring the block at _delay_ the authorities should resume voting.
+	#[codec(index = "5")]
+	Resume(N),
 }
 
 impl<N: Codec> ConsensusLog<N> {
@@ -100,7 +120,7 @@ impl<N: Codec> ConsensusLog<N> {
 	pub fn try_into_change(self) -> Option<ScheduledChange<N>> {
 		match self {
 			ConsensusLog::ScheduledChange(change) => Some(change),
-			ConsensusLog::ForcedChange(_, _) | ConsensusLog::OnDisabled(_) => None,
+			_ => None,
 		}
 	}
 
@@ -108,7 +128,23 @@ impl<N: Codec> ConsensusLog<N> {
 	pub fn try_into_forced_change(self) -> Option<(N, ScheduledChange<N>)> {
 		match self {
 			ConsensusLog::ForcedChange(median, change) => Some((median, change)),
-			ConsensusLog::ScheduledChange(_) | ConsensusLog::OnDisabled(_) => None,
+			_ => None,
+		}
+	}
+
+	/// Try to cast the log entry as a contained pause signal.
+	pub fn try_into_pause(self) -> Option<N> {
+		match self {
+			ConsensusLog::Pause(delay) => Some(delay),
+			_ => None,
+		}
+	}
+
+	/// Try to cast the log entry as a contained resume signal.
+	pub fn try_into_resume(self) -> Option<N> {
+		match self {
+			ConsensusLog::Resume(delay) => Some(delay),
+			_ => None,
 		}
 	}
 }
@@ -130,43 +166,6 @@ decl_runtime_apis! {
 	/// The consensus protocol will coordinate the handoff externally.
 	#[api_version(2)]
 	pub trait GrandpaApi {
-		/// Check a digest for pending changes.
-		/// Return `None` if there are no pending changes.
-		///
-		/// Precedence towards earlier or later digest items can be given
-		/// based on the rules of the chain.
-		///
-		/// No change should be scheduled if one is already and the delay has not
-		/// passed completely.
-		///
-		/// This should be a pure function: i.e. as long as the runtime can interpret
-		/// the digest type it should return the same result regardless of the current
-		/// state.
-		fn grandpa_pending_change(digest: &DigestFor<Block>)
-			-> Option<ScheduledChange<NumberFor<Block>>>;
-
-		/// Check a digest for forced changes.
-		/// Return `None` if there are no forced changes. Otherwise, return a
-		/// tuple containing the pending change and the median last finalized
-		/// block number at the time the change was signaled.
-		///
-		/// Added in version 2.
-		///
-		/// Forced changes are applied after a delay of _imported_ blocks,
-		/// while pending changes are applied after a delay of _finalized_ blocks.
-		///
-		/// Precedence towards earlier or later digest items can be given
-		/// based on the rules of the chain.
-		///
-		/// No change should be scheduled if one is already and the delay has not
-		/// passed completely.
-		///
-		/// This should be a pure function: i.e. as long as the runtime can interpret
-		/// the digest type it should return the same result regardless of the current
-		/// state.
-		fn grandpa_forced_change(digest: &DigestFor<Block>)
-			-> Option<(NumberFor<Block>, ScheduledChange<NumberFor<Block>>)>;
-
 		/// Get the current GRANDPA authorities and weights. This should not change except
 		/// for when changes are scheduled and the corresponding delay has passed.
 		///

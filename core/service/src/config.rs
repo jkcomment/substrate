@@ -16,20 +16,20 @@
 
 //! Service configuration.
 
-use std::{path::PathBuf, net::SocketAddr};
-use transaction_pool;
-use crate::chain_spec::ChainSpec;
 pub use client::ExecutionStrategies;
 pub use client_db::PruningMode;
 pub use network::config::{ExtTransport, NetworkConfiguration, Roles};
-use runtime_primitives::BuildStorage;
-use serde::{Serialize, de::DeserializeOwned};
+
+use std::{path::PathBuf, net::SocketAddr};
+use transaction_pool;
+use chain_spec::{ChainSpec, RuntimeGenesis, Extension, NoExtension};
+use primitives::crypto::Protected;
 use target_info::Target;
 use tel::TelemetryEndpoints;
 
 /// Service configuration.
 #[derive(Clone)]
-pub struct Configuration<C, G: Serialize + DeserializeOwned + BuildStorage> {
+pub struct Configuration<C, G, E = NoExtension> {
 	/// Implementation name
 	pub impl_name: &'static str,
 	/// Implementation version
@@ -43,7 +43,7 @@ pub struct Configuration<C, G: Serialize + DeserializeOwned + BuildStorage> {
 	/// Network configuration.
 	pub network: NetworkConfiguration,
 	/// Path to key files.
-	pub keystore_path: Option<PathBuf>,
+	pub keystore_path: PathBuf,
 	/// Path to the database.
 	pub database_path: PathBuf,
 	/// Cache Size for internal database in MiB
@@ -54,10 +54,8 @@ pub struct Configuration<C, G: Serialize + DeserializeOwned + BuildStorage> {
 	pub state_cache_child_ratio: Option<usize>,
 	/// Pruning settings.
 	pub pruning: PruningMode,
-	/// Additional key seeds.
-	pub keys: Vec<String>,
 	/// Chain configuration.
-	pub chain_spec: ChainSpec<G>,
+	pub chain_spec: ChainSpec<G, E>,
 	/// Custom configuration.
 	pub custom: C,
 	/// Node name.
@@ -86,12 +84,22 @@ pub struct Configuration<C, G: Serialize + DeserializeOwned + BuildStorage> {
 	/// Disable GRANDPA when running in validator mode
 	pub disable_grandpa: bool,
 	/// Node keystore's password
-	pub password: String,
+	pub keystore_password: Option<Protected<String>>,
+	/// Development key seed.
+	///
+	/// When running in development mode, the seed will be used to generate authority keys by the keystore.
+	///
+	/// Should only be set when `node` is running development mode.
+	pub dev_key_seed: Option<String>,
 }
 
-impl<C: Default, G: Serialize + DeserializeOwned + BuildStorage> Configuration<C, G> {
+impl<C, G, E> Configuration<C, G, E> where
+	C: Default,
+	G: RuntimeGenesis,
+	E: Extension,
+{
 	/// Create default config for given chain spec.
-	pub fn default_with_spec(chain_spec: ChainSpec<G>) -> Self {
+	pub fn default_with_spec(chain_spec: ChainSpec<G, E>) -> Self {
 		let mut configuration = Configuration {
 			impl_name: "parity-substrate",
 			impl_version: "0.0.0",
@@ -106,7 +114,6 @@ impl<C: Default, G: Serialize + DeserializeOwned + BuildStorage> Configuration<C
 			database_cache_size: Default::default(),
 			state_cache_size: Default::default(),
 			state_cache_child_ratio: Default::default(),
-			keys: Default::default(),
 			custom: Default::default(),
 			pruning: PruningMode::default(),
 			execution_strategies: Default::default(),
@@ -120,7 +127,8 @@ impl<C: Default, G: Serialize + DeserializeOwned + BuildStorage> Configuration<C
 			offchain_worker: Default::default(),
 			force_authoring: false,
 			disable_grandpa: false,
-			password: "".to_string(),
+			keystore_password: None,
+			dev_key_seed: None,
 		};
 		configuration.network.boot_nodes = configuration.chain_spec.boot_nodes().to_vec();
 
@@ -152,4 +160,3 @@ pub fn full_version_from_strs(impl_version: &str, impl_commit: &str) -> String {
 	let commit_dash = if impl_commit.is_empty() { "" } else { "-" };
 	format!("{}{}{}-{}", impl_version, commit_dash, impl_commit, platform())
 }
-

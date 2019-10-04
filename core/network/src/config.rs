@@ -26,9 +26,8 @@ use crate::chain::{Client, FinalityProofProvider};
 use crate::on_demand_layer::OnDemand;
 use crate::service::{ExHashT, TransactionPool};
 use bitflags::bitflags;
-use consensus::import_queue::ImportQueue;
-use parity_codec;
-use runtime_primitives::traits::{Block as BlockT};
+use consensus::{block_validation::BlockAnnounceValidator, import_queue::ImportQueue};
+use sr_primitives::traits::{Block as BlockT};
 use std::sync::Arc;
 use libp2p::identity::{Keypair, secp256k1, ed25519};
 use libp2p::wasm_ext;
@@ -54,6 +53,11 @@ pub struct Params<B: BlockT, S, H: ExHashT> {
 	/// from us.
 	pub finality_proof_provider: Option<Arc<dyn FinalityProofProvider<B>>>,
 
+	/// How to build requests for proofs of finality.
+	///
+	/// This object, if `Some`, is used when we need a proof of finality from another node.
+	pub finality_proof_request_builder: Option<BoxFinalityProofRequestBuilder<B>>,
+
 	/// The `OnDemand` object acts as a "receiver" for block data requests from the client.
 	/// If `Some`, the network worker will process these requests and answer them.
 	/// Normally used only for light clients.
@@ -76,6 +80,9 @@ pub struct Params<B: BlockT, S, H: ExHashT> {
 
 	/// Customization of the network. Use this to plug additional networking capabilities.
 	pub specialization: S,
+
+	/// Type to check incoming block announcements.
+	pub block_announce_validator: Box<dyn BlockAnnounceValidator<B> + Send>
 }
 
 bitflags! {
@@ -98,23 +105,49 @@ impl Roles {
 		self.intersects(Roles::FULL | Roles::AUTHORITY)
 	}
 
+	/// Does this role represents a client that does not participates in the consensus?
+	pub fn is_authority(&self) -> bool {
+		*self == Roles::AUTHORITY
+	}
+
 	/// Does this role represents a client that does not hold full chain data locally?
 	pub fn is_light(&self) -> bool {
 		!self.is_full()
 	}
 }
 
-impl parity_codec::Encode for Roles {
-	fn encode_to<T: parity_codec::Output>(&self, dest: &mut T) {
+impl codec::Encode for Roles {
+	fn encode_to<T: codec::Output>(&self, dest: &mut T) {
 		dest.push_byte(self.bits())
 	}
 }
 
-impl parity_codec::Decode for Roles {
-	fn decode<I: parity_codec::Input>(input: &mut I) -> Option<Self> {
-		Self::from_bits(input.read_byte()?)
+impl codec::EncodeLike for Roles {}
+
+impl codec::Decode for Roles {
+	fn decode<I: codec::Input>(input: &mut I) -> Result<Self, codec::Error> {
+		Self::from_bits(input.read_byte()?).ok_or_else(|| codec::Error::from("Invalid bytes"))
 	}
 }
+
+/// Finality proof request builder.
+pub trait FinalityProofRequestBuilder<B: BlockT>: Send {
+	/// Build data blob, associated with the request.
+	fn build_request_data(&mut self, hash: &B::Hash) -> Vec<u8>;
+}
+
+/// Implementation of `FinalityProofRequestBuilder` that builds a dummy empty request.
+#[derive(Debug, Default)]
+pub struct DummyFinalityProofRequestBuilder;
+
+impl<B: BlockT> FinalityProofRequestBuilder<B> for DummyFinalityProofRequestBuilder {
+	fn build_request_data(&mut self, _: &B::Hash) -> Vec<u8> {
+		Vec::new()
+	}
+}
+
+/// Shared finality proof request builder struct used by the queue.
+pub type BoxFinalityProofRequestBuilder<B> = Box<dyn FinalityProofRequestBuilder<B> + Send + Sync>;
 
 /// Name of a protocol, transmitted on the wire. Should be unique for each chain.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -133,7 +166,8 @@ impl ProtocolId {
 	}
 }
 
-/// Parses a string address and returns the component, if valid.
+/// Parses a string address and splits it into Multiaddress and PeerId, if
+/// valid.
 ///
 /// # Example
 ///
@@ -147,8 +181,12 @@ impl ProtocolId {
 /// ```
 ///
 pub fn parse_str_addr(addr_str: &str) -> Result<(PeerId, Multiaddr), ParseErr> {
-	let mut addr: Multiaddr = addr_str.parse()?;
+	let addr: Multiaddr = addr_str.parse()?;
+	parse_addr(addr)
+}
 
+/// Splits a Multiaddress into a Multiaddress and PeerId.
+pub fn parse_addr(mut addr: Multiaddr)-> Result<(PeerId, Multiaddr), ParseErr> {
 	let who = match addr.pop() {
 		Some(multiaddr::Protocol::P2p(key)) => PeerId::from_multihash(key)
 			.map_err(|_| ParseErr::InvalidPeerId)?,
@@ -170,23 +208,23 @@ pub enum ParseErr {
 }
 
 impl fmt::Display for ParseErr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParseErr::MultiaddrParse(err) => write!(f, "{}", err),
-            ParseErr::InvalidPeerId => write!(f, "Peer id at the end of the address is invalid"),
-            ParseErr::PeerIdMissing => write!(f, "Peer id is missing from the address"),
-        }
-    }
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			ParseErr::MultiaddrParse(err) => write!(f, "{}", err),
+			ParseErr::InvalidPeerId => write!(f, "Peer id at the end of the address is invalid"),
+			ParseErr::PeerIdMissing => write!(f, "Peer id is missing from the address"),
+		}
+	}
 }
 
 impl std::error::Error for ParseErr {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ParseErr::MultiaddrParse(err) => Some(err),
-            ParseErr::InvalidPeerId => None,
-            ParseErr::PeerIdMissing => None,
-        }
-    }
+	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+		match self {
+			ParseErr::MultiaddrParse(err) => Some(err),
+			ParseErr::InvalidPeerId => None,
+			ParseErr::PeerIdMissing => None,
+		}
+	}
 }
 
 impl From<multiaddr::Error> for ParseErr {
