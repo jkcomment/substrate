@@ -69,6 +69,11 @@ pub trait BareCryptoStore: Send + Sync {
 
 	/// Get the password for this store.
 	fn password(&self) -> Option<&str>;
+
+	/// Checks if the private keys for the given public key and key type combinations exist.
+	///
+	/// Returns `true` iff all private keys could be found.
+	fn has_keys(&self, public_keys: &[(Vec<u8>, KeyTypeId)]) -> bool;
 }
 
 /// A pointer to the key store.
@@ -87,12 +92,11 @@ pub trait CodeExecutor: Sized + Send + Sync + CallInWasm + Clone + 'static {
 	/// Call a given method in the runtime. Returns a tuple of the result (either the output data
 	/// or an execution error) together with a `bool`, which is true if native execution was used.
 	fn call<
-		E: Externalities,
 		R: codec::Codec + PartialEq,
 		NC: FnOnce() -> Result<R, String> + UnwindSafe,
 	>(
 		&self,
-		ext: &mut E,
+		ext: &mut dyn Externalities,
 		method: &str,
 		data: &[u8],
 		use_native: bool,

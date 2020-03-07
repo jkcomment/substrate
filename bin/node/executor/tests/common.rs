@@ -17,11 +17,8 @@
 use codec::{Encode, Decode};
 use frame_support::Hashable;
 use sp_state_machine::TestExternalities as CoreTestExternalities;
-use sp_core::{
-	Blake2Hasher, NeverNativeValue, NativeOrEncoded,
-	traits::CodeExecutor,
-};
-use sp_runtime::traits::Header as HeaderT;
+use sp_core::{NeverNativeValue, NativeOrEncoded, traits::CodeExecutor};
+use sp_runtime::{ApplyExtrinsicResult, traits::{Header as HeaderT, BlakeTwo256}};
 use sc_executor::{NativeExecutor, WasmExecutionMethod};
 use sc_executor::error::Result;
 
@@ -67,14 +64,14 @@ pub fn executor_call<
 	R:Decode + Encode + PartialEq,
 	NC: FnOnce() -> std::result::Result<R, String> + std::panic::UnwindSafe
 >(
-	t: &mut TestExternalities<Blake2Hasher>,
+	t: &mut TestExternalities<BlakeTwo256>,
 	method: &str,
 	data: &[u8],
 	use_native: bool,
 	native_call: Option<NC>,
 ) -> (Result<NativeOrEncoded<R>>, bool) {
 	let mut t = t.ext();
-	executor().call::<_, R, NC>(
+	executor().call::<R, NC>(
 		&mut t,
 		method,
 		data,
@@ -83,7 +80,7 @@ pub fn executor_call<
 	)
 }
 
-pub fn new_test_ext(code: &[u8], support_changes_trie: bool) -> TestExternalities<Blake2Hasher> {
+pub fn new_test_ext(code: &[u8], support_changes_trie: bool) -> TestExternalities<BlakeTwo256> {
 	let mut ext = TestExternalities::new_with_code(
 		code,
 		node_testing::genesis::config(support_changes_trie, Some(code)).build_storage().unwrap(),
@@ -92,8 +89,12 @@ pub fn new_test_ext(code: &[u8], support_changes_trie: bool) -> TestExternalitie
 	ext
 }
 
+/// Construct a fake block.
+///
+/// `extrinsics` must be a list of valid extrinsics, i.e. none of the extrinsics for example
+/// can report `ExhaustResources`. Otherwise, this function panics.
 pub fn construct_block(
-	env: &mut TestExternalities<Blake2Hasher>,
+	env: &mut TestExternalities<BlakeTwo256>,
 	number: BlockNumber,
 	parent_hash: Hash,
 	extrinsics: Vec<CheckedExtrinsic>,
@@ -104,10 +105,10 @@ pub fn construct_block(
 	let extrinsics = extrinsics.into_iter().map(sign).collect::<Vec<_>>();
 
 	// calculate the header fields that we can.
-	let extrinsics_root = Layout::<Blake2Hasher>::ordered_trie_root(
-			extrinsics.iter().map(Encode::encode)
-		).to_fixed_bytes()
-		.into();
+	let extrinsics_root =
+		Layout::<BlakeTwo256>::ordered_trie_root(extrinsics.iter().map(Encode::encode))
+			.to_fixed_bytes()
+			.into();
 
 	let header = Header {
 		parent_hash,
@@ -126,14 +127,20 @@ pub fn construct_block(
 		None,
 	).0.unwrap();
 
-	for i in extrinsics.iter() {
-		executor_call::<NeverNativeValue, fn() -> _>(
+	for extrinsic in extrinsics.iter() {
+		// Try to apply the `extrinsic`. It should be valid, in the sense that it passes
+		// all pre-inclusion checks.
+		let r = executor_call::<NeverNativeValue, fn() -> _>(
 			env,
 			"BlockBuilder_apply_extrinsic",
-			&i.encode(),
+			&extrinsic.encode(),
 			true,
 			None,
-		).0.unwrap();
+		).0.expect("application of an extrinsic failed").into_encoded();
+		match ApplyExtrinsicResult::decode(&mut &r[..]).expect("apply result deserialization failed") {
+			Ok(_) => {},
+			Err(e) => panic!("Applying extrinsic failed: {:?}", e),
+		}
 	}
 
 	let header = match executor_call::<NeverNativeValue, fn() -> _>(

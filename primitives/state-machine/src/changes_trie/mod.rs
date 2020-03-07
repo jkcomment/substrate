@@ -16,7 +16,7 @@
 
 //! Changes trie related structures and functions.
 //!
-//! Changes trie is a trie built of { storage key => extrinsiscs } pairs
+//! Changes trie is a trie built of { storage key => extrinsics } pairs
 //! at the end of each block. For every changed storage key it contains
 //! a pair, mapping key to the set of extrinsics where it has been changed.
 //!
@@ -68,15 +68,20 @@ pub use self::prune::prune;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use hash_db::{Hasher, Prefix};
-use crate::backend::Backend;
 use num_traits::{One, Zero};
 use codec::{Decode, Encode};
 use sp_core;
-use crate::changes_trie::build::prepare_input;
-use crate::changes_trie::build_cache::{IncompleteCachedBuildData, IncompleteCacheAction};
-use crate::overlayed_changes::OverlayedChanges;
 use sp_trie::{MemoryDB, DBValue, TrieMut};
 use sp_trie::trie_types::TrieDBMut;
+use crate::{
+	StorageKey,
+	backend::Backend,
+	overlayed_changes::OverlayedChanges,
+	changes_trie::{
+		build::prepare_input,
+		build_cache::{IncompleteCachedBuildData, IncompleteCacheAction},
+	},
+};
 
 /// Changes that are made outside of extrinsics are marked with this index;
 pub const NO_EXTRINSIC_INDEX: u32 = 0xffffffff;
@@ -125,7 +130,7 @@ pub struct AnchorBlockId<Hash: std::fmt::Debug, Number: BlockNumber> {
 pub struct State<'a, H, Number> {
 	/// Configuration that is active at given block.
 	pub config: Configuration,
-	/// Configuration activation block number. Zero if it is the first coonfiguration on the chain,
+	/// Configuration activation block number. Zero if it is the first configuration on the chain,
 	/// or number of the block that have emit NewConfiguration signal (thus activating configuration
 	/// starting from the **next** block).
 	pub zero: Number,
@@ -151,7 +156,7 @@ pub trait Storage<H: Hasher, Number: BlockNumber>: RootsStorage<H, Number> {
 	fn with_cached_changed_keys(
 		&self,
 		root: &H::Out,
-		functor: &mut dyn FnMut(&HashMap<Option<Vec<u8>>, HashSet<Vec<u8>>>),
+		functor: &mut dyn FnMut(&HashMap<Option<StorageKey>, HashSet<StorageKey>>),
 	) -> bool;
 	/// Get a trie node.
 	fn get(&self, key: &H::Out, prefix: Prefix) -> Result<Option<DBValue>, String>;
