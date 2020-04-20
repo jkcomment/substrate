@@ -121,6 +121,7 @@ mod tests {
 		type ValidatorId = AuthorityId;
 		type ValidatorIdOf = ConvertInto;
 		type DisabledValidatorsThreshold = DisabledValidatorsThreshold;
+		type NextSessionRotation = pallet_session::PeriodicSessions<Period, Offset>;
 	}
 
 	impl pallet_session::historical::Trait for Test {
@@ -153,6 +154,7 @@ mod tests {
 		type Event = ();
 		type BlockHashCount = BlockHashCount;
 		type MaximumBlockWeight = MaximumBlockWeight;
+		type DbWeight = ();
 		type AvailableBlockRatio = AvailableBlockRatio;
 		type MaximumBlockLength = MaximumBlockLength;
 		type Version = ();

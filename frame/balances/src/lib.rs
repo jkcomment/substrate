@@ -148,28 +148,22 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(test)]
-mod tests_local;
-#[cfg(test)]
-mod tests_composite;
-#[cfg(test)]
 #[macro_use]
 mod tests;
-#[cfg(feature = "runtime-benchmarks")]
+mod tests_local;
+mod tests_composite;
 mod benchmarking;
-mod migration;
 
 use sp_std::prelude::*;
 use sp_std::{cmp, result, mem, fmt::Debug, ops::BitOr, convert::Infallible};
-use sp_io::hashing::twox_64;
 use codec::{Codec, Encode, Decode};
 use frame_support::{
 	StorageValue, Parameter, decl_event, decl_storage, decl_module, decl_error, ensure,
-	weights::SimpleDispatchInfo, traits::{
+	traits::{
 		Currency, OnKilledAccount, OnUnbalanced, TryDrop, StoredMap,
 		WithdrawReason, WithdrawReasons, LockIdentifier, LockableCurrency, ExistenceRequirement,
 		Imbalance, SignedImbalance, ReservableCurrency, Get, ExistenceRequirement::KeepAlive,
-		ExistenceRequirement::AllowDeath, IsDeadAccount, BalanceStatus as Status
+		ExistenceRequirement::AllowDeath, IsDeadAccount, BalanceStatus as Status,
 	}
 };
 use sp_runtime::{
@@ -180,9 +174,6 @@ use sp_runtime::{
 	},
 };
 use frame_system::{self as system, ensure_signed, ensure_root};
-use frame_support::storage::migration::{
-	get_storage_value, take_storage_value, put_storage_value, StorageIterator, have_storage_value
-};
 
 pub use self::imbalances::{PositiveImbalance, NegativeImbalance};
 
@@ -377,11 +368,11 @@ decl_storage! {
 		/// is ever zero, then the entry *MUST* be removed.
 		///
 		/// NOTE: This is only used in the case that this module is used to store balances.
-		pub Account: map hasher(blake2_256) T::AccountId => AccountData<T::Balance>;
+		pub Account: map hasher(blake2_128_concat) T::AccountId => AccountData<T::Balance>;
 
 		/// Any liquidity locks on some account balances.
 		/// NOTE: Should only be accessed when setting, changing and freeing a lock.
-		pub Locks get(fn locks): map hasher(blake2_256) T::AccountId => Vec<BalanceLock<T::Balance>>;
+		pub Locks get(fn locks): map hasher(blake2_128_concat) T::AccountId => Vec<BalanceLock<T::Balance>>;
 
 		/// Storage version of the pallet.
 		///
@@ -442,7 +433,7 @@ decl_module! {
 		///     check that the transfer will not kill the origin account.
 		///
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::FixedNormal(1_000_000)]
+		#[weight = T::DbWeight::get().reads_writes(1, 1) + 200_000_000]
 		pub fn transfer(
 			origin,
 			dest: <T::Lookup as StaticLookup>::Source,
@@ -466,7 +457,7 @@ decl_module! {
 		/// - Independent of the arguments.
 		/// - Contains a limited number of reads and writes.
 		/// # </weight>
-		#[weight = SimpleDispatchInfo::FixedOperational(50_000)]
+		#[weight = T::DbWeight::get().reads_writes(1, 1) + 100_000_000]
 		fn set_balance(
 			origin,
 			who: <T::Lookup as StaticLookup>::Source,
@@ -504,7 +495,11 @@ decl_module! {
 
 		/// Exactly as `transfer`, except the origin must be root and the source account may be
 		/// specified.
-		#[weight = SimpleDispatchInfo::FixedNormal(1_000_000)]
+		/// # <weight>
+		/// - Same as transfer, but additional read and write because the source account is
+		///   not assumed to be in the overlay.
+		/// # </weight>
+		#[weight = T::DbWeight::get().reads_writes(2, 2) + 200_000_000]
 		pub fn force_transfer(
 			origin,
 			source: <T::Lookup as StaticLookup>::Source,
@@ -523,7 +518,7 @@ decl_module! {
 		/// 99% of the time you want [`transfer`] instead.
 		///
 		/// [`transfer`]: struct.Module.html#method.transfer
-		#[weight = SimpleDispatchInfo::FixedNormal(1_000_000)]
+		#[weight = T::DbWeight::get().reads_writes(1, 1) + 150_000_000]
 		pub fn transfer_keep_alive(
 			origin,
 			dest: <T::Lookup as StaticLookup>::Source,
@@ -533,28 +528,6 @@ decl_module! {
 			let dest = T::Lookup::lookup(dest)?;
 			<Self as Currency<_>>::transfer(&transactor, &dest, value, KeepAlive)?;
 		}
-
-		fn on_runtime_upgrade() {
-			migration::on_runtime_upgrade::<T, I>();
-		}
-	}
-}
-
-#[derive(Decode)]
-struct OldBalanceLock<Balance, BlockNumber> {
-	id: LockIdentifier,
-	amount: Balance,
-	until: BlockNumber,
-	reasons: WithdrawReasons,
-}
-
-impl<Balance, BlockNumber> OldBalanceLock<Balance, BlockNumber> {
-	fn upgraded(self) -> (BalanceLock<Balance>, BlockNumber) {
-		(BalanceLock {
-			id: self.id,
-			amount: self.amount,
-			reasons: self.reasons.into(),
-		}, self.until)
 	}
 }
 
@@ -873,6 +846,7 @@ impl<T: Subtrait<I>, I: Instance> frame_system::Trait for ElevatedTrait<T, I> {
 	type Event = ();
 	type BlockHashCount = T::BlockHashCount;
 	type MaximumBlockWeight = T::MaximumBlockWeight;
+	type DbWeight = T::DbWeight;
 	type MaximumBlockLength = T::MaximumBlockLength;
 	type AvailableBlockRatio = T::AvailableBlockRatio;
 	type Version = T::Version;

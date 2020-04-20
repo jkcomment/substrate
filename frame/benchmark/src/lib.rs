@@ -21,12 +21,13 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use frame_support::{decl_module, decl_storage, decl_event, decl_error};
+use frame_support::weights::{SimpleDispatchInfo, MINIMUM_WEIGHT};
 use frame_support::traits::Currency;
 use frame_system::{self as system, ensure_signed};
 use codec::{Encode, Decode};
 use sp_std::prelude::Vec;
 
-pub mod benchmarking;
+mod benchmarking;
 
 /// Type alias for currency balance.
 pub type BalanceOf<T> = <<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
@@ -41,10 +42,10 @@ pub trait Trait: system::Trait {
 decl_storage! {
 	trait Store for Module<T: Trait> as Benchmark {
 		MyMemberList: Vec<T::AccountId>;
-		MyMemberMap: map hasher(blake2_256) T::AccountId => bool;
+		MyMemberMap: map hasher(blake2_128_concat) T::AccountId => bool;
 		MyValue: u32;
-		MyMap: map hasher(blake2_256) u32 => u32;
-		MyDoubleMap: double_map hasher(blake2_256) u32, hasher(blake2_256) u32 => u32;
+		MyMap: map hasher(twox_64_concat) u32 => u32;
+		MyDoubleMap: double_map hasher(twox_64_concat) u32, hasher(identity) u32 => u32;
 	}
 }
 
@@ -70,6 +71,7 @@ decl_module! {
 		fn deposit_event() = default;
 
 		/// Do nothing.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn do_nothing(_origin, input: u32) {
 			if input > 0 {
 				return Ok(());
@@ -81,6 +83,7 @@ decl_module! {
 		/// storage database, however, the `repeat` calls will all pull from the
 		/// storage overlay cache. You must consider this when analyzing the
 		/// results of the benchmark.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn read_value(_origin, repeat: u32) {
 			for _ in 0..repeat {
 				MyValue::get();
@@ -88,6 +91,7 @@ decl_module! {
 		}
 
 		/// Put a value into a storage value.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn put_value(_origin, repeat: u32) {
 			for r in 0..repeat {
 				MyValue::put(r);
@@ -99,6 +103,7 @@ decl_module! {
 		/// storage database, however, the `repeat` calls will all pull from the
 		/// storage overlay cache. You must consider this when analyzing the
 		/// results of the benchmark.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn exists_value(_origin, repeat: u32) {
 			for _ in 0..repeat {
 				MyValue::exists();
@@ -106,6 +111,7 @@ decl_module! {
 		}
 
 		/// Remove a value from storage `repeat` number of times.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn remove_value(_origin, repeat: u32) {
 			for r in 0..repeat {
 				MyMap::remove(r);
@@ -113,6 +119,7 @@ decl_module! {
 		}
 
 		/// Read a value from storage map `repeat` number of times.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn read_map(_origin, repeat: u32) {
 			for r in 0..repeat {
 				MyMap::get(r);
@@ -120,6 +127,7 @@ decl_module! {
 		}
 
 		/// Insert a value into a map.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn insert_map(_origin, repeat: u32) {
 			for r in 0..repeat {
 				MyMap::insert(r, r);
@@ -127,6 +135,7 @@ decl_module! {
 		}
 
 		/// Check is a map contains a value `repeat` number of times.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn contains_key_map(_origin, repeat: u32) {
 			for r in 0..repeat {
 				MyMap::contains_key(r);
@@ -134,25 +143,29 @@ decl_module! {
 		}
 
 		/// Read a value from storage `repeat` number of times.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn remove_prefix(_origin, repeat: u32) {
 			for r in 0..repeat {
 				MyDoubleMap::remove_prefix(r);
 			}
 		}
 
-		// Add user to the list.
+		/// Add user to the list.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn add_member_list(origin) {
 			let who = ensure_signed(origin)?;
 			MyMemberList::<T>::mutate(|x| x.push(who));
 		}
 
-		// Append user to the list.
+		/// Append user to the list.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn append_member_list(origin) {
 			let who = ensure_signed(origin)?;
 			MyMemberList::<T>::append(&[who])?;
 		}
 
-		// Encode a vector of accounts to bytes.
+		/// Encode a vector of accounts to bytes.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn encode_accounts(_origin, accounts: Vec<T::AccountId>) {
 			let bytes = accounts.encode();
 
@@ -163,7 +176,8 @@ decl_module! {
 			}
 		}
 
-		// Decode bytes into a vector of accounts.
+		/// Decode bytes into a vector of accounts.
+		#[weight = SimpleDispatchInfo::FixedNormal(MINIMUM_WEIGHT)]
 		pub fn decode_accounts(_origin, bytes: Vec<u8>) {
 			let accounts: Vec<T::AccountId> = Decode::decode(&mut bytes.as_slice()).map_err(|_| "Could not decode")?;
 
