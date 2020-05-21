@@ -1,18 +1,20 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Configuration of the networking layer.
 //!
@@ -21,7 +23,6 @@
 
 pub use crate::chain::{Client, FinalityProofProvider};
 pub use crate::on_demand_layer::{AlwaysBadChecker, OnDemand};
-pub use crate::service::{TransactionPool, EmptyTransactionPool};
 pub use libp2p::{identity, core::PublicKey, wasm_ext::ExtTransport, build_multiaddr};
 
 // Note: this re-export shouldn't be part of the public API of the crate and will be removed in
@@ -29,9 +30,10 @@ pub use libp2p::{identity, core::PublicKey, wasm_ext::ExtTransport, build_multia
 #[doc(hidden)]
 pub use crate::protocol::ProtocolConfig;
 
-use crate::service::ExHashT;
+use crate::ExHashT;
 
 use core::{fmt, iter};
+use futures::future;
 use libp2p::identity::{ed25519, Keypair};
 use libp2p::wasm_ext;
 use libp2p::{multiaddr, Multiaddr, PeerId};
@@ -40,6 +42,7 @@ use sp_consensus::{block_validation::BlockAnnounceValidator, import_queue::Impor
 use sp_runtime::{traits::Block as BlockT, ConsensusEngineId};
 use std::{borrow::Cow, convert::TryFrom, future::Future, pin::Pin, str::FromStr};
 use std::{
+	collections::HashMap,
 	error::Error,
 	fs,
 	io::{self, Write},
@@ -165,6 +168,70 @@ impl<B: BlockT> FinalityProofRequestBuilder<B> for DummyFinalityProofRequestBuil
 
 /// Shared finality proof request builder struct used by the queue.
 pub type BoxFinalityProofRequestBuilder<B> = Box<dyn FinalityProofRequestBuilder<B> + Send + Sync>;
+
+/// Result of the transaction import.
+#[derive(Clone, Copy, Debug)]
+pub enum TransactionImport {
+	/// Transaction is good but already known by the transaction pool.
+	KnownGood,
+	/// Transaction is good and not yet known.
+	NewGood,
+	/// Transaction is invalid.
+	Bad,
+	/// Transaction import was not performed.
+	None,
+}
+
+/// Fuure resolving to transaction import result.
+pub type TransactionImportFuture = Pin<Box<dyn Future<Output=TransactionImport> + Send>>;
+
+/// Transaction pool interface
+pub trait TransactionPool<H: ExHashT, B: BlockT>: Send + Sync {
+	/// Get transactions from the pool that are ready to be propagated.
+	fn transactions(&self) -> Vec<(H, B::Extrinsic)>;
+	/// Get hash of transaction.
+	fn hash_of(&self, transaction: &B::Extrinsic) -> H;
+	/// Import a transaction into the pool.
+	///
+	/// This will return future.
+	fn import(
+		&self,
+		transaction: B::Extrinsic,
+	) -> TransactionImportFuture;
+	/// Notify the pool about transactions broadcast.
+	fn on_broadcasted(&self, propagations: HashMap<H, Vec<String>>);
+	/// Get transaction by hash.
+	fn transaction(&self, hash: &H) -> Option<B::Extrinsic>;
+}
+
+/// Dummy implementation of the [`TransactionPool`] trait for a transaction pool that is always
+/// empty and discards all incoming transactions.
+///
+/// Requires the "hash" type to implement the `Default` trait.
+///
+/// Useful for testing purposes.
+pub struct EmptyTransactionPool;
+
+impl<H: ExHashT + Default, B: BlockT> TransactionPool<H, B> for EmptyTransactionPool {
+	fn transactions(&self) -> Vec<(H, B::Extrinsic)> {
+		Vec::new()
+	}
+
+	fn hash_of(&self, _transaction: &B::Extrinsic) -> H {
+		Default::default()
+	}
+
+	fn import(
+		&self,
+		_transaction: B::Extrinsic
+	) -> TransactionImportFuture {
+		Box::pin(future::ready(TransactionImport::KnownGood))
+	}
+
+	fn on_broadcasted(&self, _: HashMap<H, Vec<String>>) {}
+
+	fn transaction(&self, _h: &H) -> Option<B::Extrinsic> { None }
+}
 
 /// Name of a protocol, transmitted on the wire. Should be unique for each chain.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -343,6 +410,11 @@ pub struct NetworkConfiguration {
 	pub transport: TransportConfig,
 	/// Maximum number of peers to ask the same blocks in parallel.
 	pub max_parallel_downloads: u32,
+	/// Should we insert non-global addresses into the DHT?
+	pub allow_non_globals_in_dht: bool,
+	/// If true, uses the `/<chainid>/block-requests/<version>` experimental protocol rather than
+	/// the legacy substream. This option is meant to be hard-wired to `true` in the future.
+	pub use_new_block_requests_protocol: bool,
 }
 
 impl NetworkConfiguration {
@@ -373,6 +445,8 @@ impl NetworkConfiguration {
 				use_yamux_flow_control: false,
 			},
 			max_parallel_downloads: 5,
+			allow_non_globals_in_dht: false,
+			use_new_block_requests_protocol: true,
 		}
 	}
 }
@@ -393,6 +467,7 @@ impl NetworkConfiguration {
 				.collect()
 		];
 
+		config.allow_non_globals_in_dht = true;
 		config
 	}
 
@@ -411,6 +486,7 @@ impl NetworkConfiguration {
 				.collect()
 		];
 
+		config.allow_non_globals_in_dht = true;
 		config
 	}
 }

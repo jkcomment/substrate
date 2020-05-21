@@ -1,18 +1,20 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! State backend that's useful for benchmarking
 
@@ -77,10 +79,9 @@ impl<B: BlockT> BenchmarkingState<B> {
 		};
 
 		state.reopen()?;
-		let child_delta = genesis.children.into_iter().map(|(storage_key, child_content)| (
-			storage_key,
+		let child_delta = genesis.children_default.into_iter().map(|(_storage_key, child_content)| (
+			child_content.child_info,
 			child_content.data.into_iter().map(|(k, v)| (k, Some(v))),
-			child_content.child_info
 		));
 		let (root, transaction): (B::Hash, _) = state.state.borrow_mut().as_mut().unwrap().full_storage_root(
 			genesis.top.into_iter().map(|(k, v)| (k, Some(v))),
@@ -129,11 +130,10 @@ impl<B: BlockT> StateBackend<HashFor<B>> for BenchmarkingState<B> {
 
 	fn child_storage(
 		&self,
-		storage_key: &[u8],
-		child_info: ChildInfo,
+		child_info: &ChildInfo,
 		key: &[u8],
 	) -> Result<Option<Vec<u8>>, Self::Error> {
-		self.state.borrow().as_ref().ok_or_else(state_err)?.child_storage(storage_key, child_info, key)
+		self.state.borrow().as_ref().ok_or_else(state_err)?.child_storage(child_info, key)
 	}
 
 	fn exists_storage(&self, key: &[u8]) -> Result<bool, Self::Error> {
@@ -142,11 +142,10 @@ impl<B: BlockT> StateBackend<HashFor<B>> for BenchmarkingState<B> {
 
 	fn exists_child_storage(
 		&self,
-		storage_key: &[u8],
-		child_info: ChildInfo,
+		child_info: &ChildInfo,
 		key: &[u8],
 	) -> Result<bool, Self::Error> {
-		self.state.borrow().as_ref().ok_or_else(state_err)?.exists_child_storage(storage_key, child_info, key)
+		self.state.borrow().as_ref().ok_or_else(state_err)?.exists_child_storage(child_info, key)
 	}
 
 	fn next_storage_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -155,11 +154,10 @@ impl<B: BlockT> StateBackend<HashFor<B>> for BenchmarkingState<B> {
 
 	fn next_child_storage_key(
 		&self,
-		storage_key: &[u8],
-		child_info: ChildInfo,
+		child_info: &ChildInfo,
 		key: &[u8],
 	) -> Result<Option<Vec<u8>>, Self::Error> {
-		self.state.borrow().as_ref().ok_or_else(state_err)?.next_child_storage_key(storage_key, child_info, key)
+		self.state.borrow().as_ref().ok_or_else(state_err)?.next_child_storage_key(child_info, key)
 	}
 
 	fn for_keys_with_prefix<F: FnMut(&[u8])>(&self, prefix: &[u8], f: F) {
@@ -176,24 +174,22 @@ impl<B: BlockT> StateBackend<HashFor<B>> for BenchmarkingState<B> {
 
 	fn for_keys_in_child_storage<F: FnMut(&[u8])>(
 		&self,
-		storage_key: &[u8],
-		child_info: ChildInfo,
+		child_info: &ChildInfo,
 		f: F,
 	) {
 		if let Some(ref state) = *self.state.borrow() {
-			state.for_keys_in_child_storage(storage_key, child_info, f)
+			state.for_keys_in_child_storage(child_info, f)
 		}
 	}
 
 	fn for_child_keys_with_prefix<F: FnMut(&[u8])>(
 		&self,
-		storage_key: &[u8],
-		child_info: ChildInfo,
+		child_info: &ChildInfo,
 		prefix: &[u8],
 		f: F,
 	) {
 		if let Some(ref state) = *self.state.borrow() {
-			state.for_child_keys_with_prefix(storage_key, child_info, prefix, f)
+			state.for_child_keys_with_prefix(child_info, prefix, f)
 		}
 	}
 
@@ -205,13 +201,12 @@ impl<B: BlockT> StateBackend<HashFor<B>> for BenchmarkingState<B> {
 
 	fn child_storage_root<I>(
 		&self,
-		storage_key: &[u8],
-		child_info: ChildInfo,
+		child_info: &ChildInfo,
 		delta: I,
 	) -> (B::Hash, bool, Self::Transaction) where
 		I: IntoIterator<Item=(Vec<u8>, Option<Vec<u8>>)>,
 	{
-		self.state.borrow().as_ref().map_or(Default::default(), |s| s.child_storage_root(storage_key, child_info, delta))
+		self.state.borrow().as_ref().map_or(Default::default(), |s| s.child_storage_root(child_info, delta))
 	}
 
 	fn pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -224,11 +219,10 @@ impl<B: BlockT> StateBackend<HashFor<B>> for BenchmarkingState<B> {
 
 	fn child_keys(
 		&self,
-		storage_key: &[u8],
-		child_info: ChildInfo,
+		child_info: &ChildInfo,
 		prefix: &[u8],
 	) -> Vec<Vec<u8>> {
-		self.state.borrow().as_ref().map_or(Default::default(), |s| s.child_keys(storage_key, child_info, prefix))
+		self.state.borrow().as_ref().map_or(Default::default(), |s| s.child_keys(child_info, prefix))
 	}
 
 	fn as_trie_backend(&mut self)
