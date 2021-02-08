@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -22,7 +22,7 @@ use sp_wasm_interface::{Function, Value, ValueType};
 use std::any::Any;
 use wasmtime::{
 	Extern, ExternType, Func, FuncType, ImportType, Limits, Memory, MemoryType, Module,
-	Trap, Val,
+	Trap, Val, Store,
 };
 
 pub struct Imports {
@@ -35,6 +35,7 @@ pub struct Imports {
 /// Goes over all imports of a module and prepares a vector of `Extern`s that can be used for
 /// instantiation of the module. Returns an error if there are imports that cannot be satisfied.
 pub fn resolve_imports(
+	store: &Store,
 	module: &Module,
 	host_functions: &[&'static dyn Function],
 	heap_pages: u32,
@@ -43,21 +44,23 @@ pub fn resolve_imports(
 	let mut externs = vec![];
 	let mut memory_import_index = None;
 	for import_ty in module.imports() {
+		let name = import_name(&import_ty)?;
+
 		if import_ty.module() != "env" {
 			return Err(WasmError::Other(format!(
 				"host doesn't provide any imports from non-env module: {}:{}",
 				import_ty.module(),
-				import_ty.name()
+				name,
 			)));
 		}
 
-		let resolved = match import_ty.name() {
+		let resolved = match name {
 			"memory" => {
 				memory_import_index = Some(externs.len());
-				resolve_memory_import(module, &import_ty, heap_pages)?
+				resolve_memory_import(store, &import_ty, heap_pages)?
 			}
 			_ => resolve_func_import(
-				module,
+				store,
 				&import_ty,
 				host_functions,
 				allow_missing_func_imports,
@@ -71,8 +74,18 @@ pub fn resolve_imports(
 	})
 }
 
+/// When the module linking proposal is supported the import's name can be `None`.
+/// Because we are not using this proposal we could safely unwrap the name.
+/// However, we opt for an error in order to avoid panics at all costs.
+fn import_name<'a, 'b: 'a>(import: &'a ImportType<'b>) -> Result<&'a str, WasmError> {
+	let name = import.name().ok_or_else(||
+		WasmError::Other("The module linking proposal is not supported.".to_owned())
+	)?;
+	Ok(name)
+}
+
 fn resolve_memory_import(
-	module: &Module,
+	store: &Store,
 	import_ty: &ImportType,
 	heap_pages: u32,
 ) -> Result<Extern, WasmError> {
@@ -82,7 +95,7 @@ fn resolve_memory_import(
 			return Err(WasmError::Other(format!(
 				"this import must be of memory type: {}:{}",
 				import_ty.module(),
-				import_ty.name()
+				import_name(&import_ty)?,
 			)))
 		}
 	};
@@ -105,57 +118,54 @@ fn resolve_memory_import(
 	}
 
 	let memory_ty = MemoryType::new(Limits::new(initial, requested_memory_ty.limits().max()));
-	let memory = Memory::new(module.store(), memory_ty);
+	let memory = Memory::new(store, memory_ty);
 	Ok(Extern::Memory(memory))
 }
 
 fn resolve_func_import(
-	module: &Module,
+	store: &Store,
 	import_ty: &ImportType,
 	host_functions: &[&'static dyn Function],
 	allow_missing_func_imports: bool,
 ) -> Result<Extern, WasmError> {
+	let name = import_name(&import_ty)?;
+
 	let func_ty = match import_ty.ty() {
 		ExternType::Func(func_ty) => func_ty,
 		_ => {
 			return Err(WasmError::Other(format!(
 				"host doesn't provide any non function imports besides 'memory': {}:{}",
 				import_ty.module(),
-				import_ty.name()
+				name,
 			)));
 		}
 	};
 
 	let host_func = match host_functions
 		.iter()
-		.find(|host_func| host_func.name() == import_ty.name())
+		.find(|host_func| host_func.name() == name)
 	{
 		Some(host_func) => host_func,
 		None if allow_missing_func_imports => {
-			return Ok(MissingHostFuncHandler::new(import_ty).into_extern(module, &func_ty));
+			return Ok(MissingHostFuncHandler::new(import_ty)?.into_extern(store, &func_ty));
 		}
 		None => {
 			return Err(WasmError::Other(format!(
 				"host doesn't provide such function: {}:{}",
 				import_ty.module(),
-				import_ty.name()
+				name,
 			)));
 		}
 	};
-	if !signature_matches(&func_ty, &wasmtime_func_sig(*host_func)) {
+	if &func_ty != &wasmtime_func_sig(*host_func) {
 		return Err(WasmError::Other(format!(
 			"signature mismatch for: {}:{}",
 			import_ty.module(),
-			import_ty.name()
+			name,
 		)));
 	}
 
-	Ok(HostFuncHandler::new(*host_func).into_extern(module))
-}
-
-/// Returns `true` if `lhs` and `rhs` represent the same signature.
-fn signature_matches(lhs: &wasmtime::FuncType, rhs: &wasmtime::FuncType) -> bool {
-	lhs.params() == rhs.params() && lhs.results() == rhs.results()
+	Ok(HostFuncHandler::new(*host_func).into_extern(store))
 }
 
 /// This structure implements `Callable` and acts as a bridge between wasmtime and
@@ -223,10 +233,10 @@ impl HostFuncHandler {
 		}
 	}
 
-	fn into_extern(self, module: &Module) -> Extern {
+	fn into_extern(self, store: &Store) -> Extern {
 		let host_func = self.host_func;
 		let func_ty = wasmtime_func_sig(self.host_func);
-		let func = Func::new(module.store(), func_ty,
+		let func = Func::new(store, func_ty,
 			move |_, params, result| {
 				call_static(host_func, params, result)
 			}
@@ -242,16 +252,16 @@ struct MissingHostFuncHandler {
 }
 
 impl MissingHostFuncHandler {
-	fn new(import_ty: &ImportType) -> Self {
-		Self {
+	fn new(import_ty: &ImportType) -> Result<Self, WasmError> {
+		Ok(Self {
 			module: import_ty.module().to_string(),
-			name: import_ty.name().to_string(),
-		}
+			name: import_name(import_ty)?.to_string(),
+		})
 	}
 
-	fn into_extern(self, wasmtime_module: &Module, func_ty: &FuncType) -> Extern {
+	fn into_extern(self, store: &Store, func_ty: &FuncType) -> Extern {
 		let Self { module, name } = self;
-		let func = Func::new(wasmtime_module.store(), func_ty.clone(),
+		let func = Func::new(store, func_ty.clone(),
 			move |_, _, _| Err(Trap::new(format!(
 				"call to a missing function {}:{}",
 				module, name
@@ -262,22 +272,17 @@ impl MissingHostFuncHandler {
 }
 
 fn wasmtime_func_sig(func: &dyn Function) -> wasmtime::FuncType {
-	let params = func
-		.signature()
+	let signature = func.signature();
+	let params = signature
 		.args
 		.iter()
 		.cloned()
-		.map(into_wasmtime_val_type)
-		.collect::<Vec<_>>()
-		.into_boxed_slice();
-	let results = func
-		.signature()
+		.map(into_wasmtime_val_type);
+	let results = signature
 		.return_value
 		.iter()
 		.cloned()
-		.map(into_wasmtime_val_type)
-		.collect::<Vec<_>>()
-		.into_boxed_slice();
+		.map(into_wasmtime_val_type);
 	wasmtime::FuncType::new(params, results)
 }
 
@@ -293,7 +298,7 @@ fn into_wasmtime_val_type(val_ty: ValueType) -> wasmtime::ValType {
 /// Converts a `Val` into a substrate runtime interface `Value`.
 ///
 /// Panics if the given value doesn't have a corresponding variant in `Value`.
-fn into_value(val: Val) -> Value {
+pub fn into_value(val: Val) -> Value {
 	match val {
 		Val::I32(v) => Value::I32(v),
 		Val::I64(v) => Value::I64(v),
@@ -303,7 +308,7 @@ fn into_value(val: Val) -> Value {
 	}
 }
 
-fn into_wasmtime_val(value: Value) -> wasmtime::Val {
+pub fn into_wasmtime_val(value: Value) -> wasmtime::Val {
 	match value {
 		Value::I32(v) => Val::I32(v),
 		Value::I64(v) => Val::I64(v),

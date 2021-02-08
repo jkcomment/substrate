@@ -1,25 +1,27 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Blockchain API backend for full nodes.
 
 use std::sync::Arc;
 use rpc::futures::future::result;
+use jsonrpc_pubsub::manager::SubscriptionManager;
 
-use sc_rpc_api::Subscriptions;
 use sc_client_api::{BlockchainEvents, BlockBackend};
 use sp_runtime::{generic::{BlockId, SignedBlock}, traits::{Block as BlockT}};
 
@@ -32,14 +34,14 @@ pub struct FullChain<Block: BlockT, Client> {
 	/// Substrate client.
 	client: Arc<Client>,
 	/// Current subscriptions.
-	subscriptions: Subscriptions,
+	subscriptions: SubscriptionManager,
 	/// phantom member to pin the block type
 	_phantom: PhantomData<Block>,
 }
 
 impl<Block: BlockT, Client> FullChain<Block, Client> {
 	/// Create new Chain API RPC handler.
-	pub fn new(client: Arc<Client>, subscriptions: Subscriptions) -> Self {
+	pub fn new(client: Arc<Client>, subscriptions: SubscriptionManager) -> Self {
 		Self {
 			client,
 			subscriptions,
@@ -56,7 +58,7 @@ impl<Block, Client> ChainBackend<Client, Block> for FullChain<Block, Client> whe
 		&self.client
 	}
 
-	fn subscriptions(&self) -> &Subscriptions {
+	fn subscriptions(&self) -> &SubscriptionManager {
 		&self.subscriptions
 	}
 

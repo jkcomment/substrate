@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,23 +21,31 @@
 
 use std::cell::RefCell;
 
-use crate::{Module, Trait};
+use crate::Config;
 use sp_runtime::Perbill;
 use sp_staking::{SessionIndex, offence::{ReportOffence, OffenceError}};
 use sp_runtime::testing::{Header, UintAuthorityId, TestXt};
 use sp_runtime::traits::{IdentityLookup, BlakeTwo256, ConvertInto};
 use sp_core::H256;
-use frame_support::{impl_outer_origin, impl_outer_dispatch, parameter_types, weights::Weight};
-use frame_system as system;
-impl_outer_origin!{
-	pub enum Origin for Runtime {}
-}
+use frame_support::parameter_types;
+use crate as imonline;
+use pallet_session::historical as pallet_session_historical;
 
-impl_outer_dispatch! {
-	pub enum Call for Runtime where origin: Origin {
-		imonline::ImOnline,
+type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Runtime>;
+type Block = frame_system::mocking::MockBlock<Runtime>;
+
+frame_support::construct_runtime!(
+	pub enum Runtime where
+		Block = Block,
+		NodeBlock = Block,
+		UncheckedExtrinsic = UncheckedExtrinsic,
+	{
+		System: frame_system::{Module, Call, Config, Storage, Event<T>},
+		Session: pallet_session::{Module, Call, Storage, Event, Config<T>},
+		ImOnline: imonline::{Module, Call, Storage, Config<T>, Event<T>},
+		Historical: pallet_session_historical::{Module},
 	}
-}
+);
 
 thread_local! {
 	pub static VALIDATORS: RefCell<Option<Vec<u64>>> = RefCell::new(Some(vec![
@@ -86,24 +94,30 @@ impl ReportOffence<u64, IdentificationTuple, Offence> for OffenceHandler {
 		OFFENCES.with(|l| l.borrow_mut().push((reporters, offence)));
 		Ok(())
 	}
+
+	fn is_known_offence(_offenders: &[IdentificationTuple], _time_slot: &SessionIndex) -> bool {
+		false
+	}
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
-	let t = frame_system::GenesisConfig::default().build_storage::<Runtime>().unwrap();
+	let t = frame_system::GenesisConfig::default()
+		.build_storage::<Runtime>()
+		.unwrap();
 	t.into()
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Runtime;
-
 parameter_types! {
 	pub const BlockHashCount: u64 = 250;
-	pub const MaximumBlockWeight: Weight = 1024;
-	pub const MaximumBlockLength: u32 = 2 * 1024;
-	pub const AvailableBlockRatio: Perbill = Perbill::one();
+	pub BlockWeights: frame_system::limits::BlockWeights =
+		frame_system::limits::BlockWeights::simple_max(1024);
 }
 
-impl frame_system::Trait for Runtime {
+impl frame_system::Config for Runtime {
+	type BaseCallFilter = ();
+	type BlockWeights = ();
+	type BlockLength = ();
+	type DbWeight = ();
 	type Origin = Origin;
 	type Index = u64;
 	type BlockNumber = u64;
@@ -113,20 +127,15 @@ impl frame_system::Trait for Runtime {
 	type AccountId = u64;
 	type Lookup = IdentityLookup<Self::AccountId>;
 	type Header = Header;
-	type Event = ();
+	type Event = Event;
 	type BlockHashCount = BlockHashCount;
-	type MaximumBlockWeight = MaximumBlockWeight;
-	type DbWeight = ();
-	type BlockExecutionWeight = ();
-	type ExtrinsicBaseWeight = ();
-	type MaximumExtrinsicWeight = MaximumBlockWeight;
-	type MaximumBlockLength = MaximumBlockLength;
-	type AvailableBlockRatio = AvailableBlockRatio;
 	type Version = ();
-	type ModuleToIndex = ();
+	type PalletInfo = PalletInfo;
 	type AccountData = ();
 	type OnNewAccount = ();
 	type OnKilledAccount = ();
+	type SystemWeightInfo = ();
+	type SS58Prefix = ();
 }
 
 parameter_types! {
@@ -138,19 +147,20 @@ parameter_types! {
 	pub const DisabledValidatorsThreshold: Perbill = Perbill::from_percent(33);
 }
 
-impl pallet_session::Trait for Runtime {
+impl pallet_session::Config for Runtime {
 	type ShouldEndSession = pallet_session::PeriodicSessions<Period, Offset>;
 	type SessionManager = pallet_session::historical::NoteHistoricalRoot<Runtime, TestSessionManager>;
 	type SessionHandler = (ImOnline, );
 	type ValidatorId = u64;
 	type ValidatorIdOf = ConvertInto;
 	type Keys = UintAuthorityId;
-	type Event = ();
+	type Event = Event;
 	type DisabledValidatorsThreshold = DisabledValidatorsThreshold;
 	type NextSessionRotation = pallet_session::PeriodicSessions<Period, Offset>;
+	type WeightInfo = ();
 }
 
-impl pallet_session::historical::Trait for Runtime {
+impl pallet_session::historical::Config for Runtime {
 	type FullIdentification = u64;
 	type FullIdentificationOf = ConvertInto;
 }
@@ -159,7 +169,7 @@ parameter_types! {
 	pub const UncleGenerations: u32 = 5;
 }
 
-impl pallet_authorship::Trait for Runtime {
+impl pallet_authorship::Config for Runtime {
 	type FindAuthor = ();
 	type UncleGenerations = UncleGenerations;
 	type FilterUncle = ();
@@ -170,12 +180,14 @@ parameter_types! {
 	pub const UnsignedPriority: u64 = 1 << 20;
 }
 
-impl Trait for Runtime {
+impl Config for Runtime {
 	type AuthorityId = UintAuthorityId;
-	type Event = ();
+	type Event = Event;
 	type ReportUnresponsiveness = OffenceHandler;
+	type ValidatorSet = Historical;
 	type SessionDuration = Period;
 	type UnsignedPriority = UnsignedPriority;
+	type WeightInfo = ();
 }
 
 impl<LocalCall> frame_system::offchain::SendTransactionTypes<LocalCall> for Runtime where
@@ -184,11 +196,6 @@ impl<LocalCall> frame_system::offchain::SendTransactionTypes<LocalCall> for Runt
 	type OverarchingCall = Call;
 	type Extrinsic = Extrinsic;
 }
-
-/// Im Online module.
-pub type ImOnline = Module<Runtime>;
-pub type System = frame_system::Module<Runtime>;
-pub type Session = pallet_session::Module<Runtime>;
 
 pub fn advance_session() {
 	let now = System::block_number().max(1);

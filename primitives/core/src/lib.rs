@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -32,6 +32,7 @@ macro_rules! map {
 	);
 }
 
+use sp_runtime_interface::pass_by::{PassByEnum, PassByInner};
 use sp_std::prelude::*;
 use sp_std::ops::Deref;
 #[cfg(feature = "std")]
@@ -50,9 +51,9 @@ pub use impl_serde::serialize as bytes;
 
 #[cfg(feature = "full_crypto")]
 pub mod hashing;
+
 #[cfg(feature = "full_crypto")]
 pub use hashing::{blake2_128, blake2_256, twox_64, twox_128, twox_256, keccak_256};
-#[cfg(feature = "std")]
 pub mod hexdisplay;
 pub mod crypto;
 
@@ -71,8 +72,6 @@ mod changes_trie;
 #[cfg(feature = "std")]
 pub mod traits;
 pub mod testing;
-#[cfg(feature = "std")]
-pub mod tasks;
 
 pub use self::hash::{H160, H256, H512, convert_hash};
 pub use self::uint::{U256, U512};
@@ -83,6 +82,8 @@ pub use crypto::{DeriveJunction, Pair, Public};
 pub use hash_db::Hasher;
 #[cfg(feature = "std")]
 pub use self::hasher::blake2::Blake2Hasher;
+#[cfg(feature = "std")]
+pub use self::hasher::keccak::KeccakHasher;
 
 pub use sp_storage as storage;
 
@@ -91,9 +92,16 @@ pub use sp_std;
 
 /// Context for executing a call into the runtime.
 pub enum ExecutionContext {
-	/// Context for general importing (including own blocks).
+	/// Context used for general block import (including locally authored blocks).
 	Importing,
-	/// Context used when syncing the blockchain.
+	/// Context used for importing blocks as part of an initial sync of the blockchain.
+	///
+	/// We distinguish between major sync and import so that validators who are running
+	/// their initial sync (or catching up after some time offline) can use the faster
+	/// native runtime (since we can reasonably assume the network as a whole has already
+	/// come to a broad conensus on the block and it probably hasn't been crafted
+	/// specifically to attack this node), but when importing blocks at the head of the
+	/// chain in normal operation they can use the safer Wasm version.
 	Syncing,
 	/// Context used for block construction.
 	BlockConstruction,
@@ -167,6 +175,18 @@ impl sp_std::ops::Deref for OpaqueMetadata {
 	}
 }
 
+/// Simple blob to hold a `PeerId` without committing to its format.
+#[derive(Default, Clone, Eq, PartialEq, Ord, PartialOrd, Encode, Decode, RuntimeDebug, PassByInner)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+pub struct OpaquePeerId(pub Vec<u8>);
+
+impl OpaquePeerId {
+	/// Create new `OpaquePeerId`
+	pub fn new(vec: Vec<u8>) -> Self {
+		OpaquePeerId(vec)
+	}
+}
+
 /// Something that is either a native or an encoded value.
 #[cfg(feature = "std")]
 pub enum NativeOrEncoded<R> {
@@ -174,6 +194,13 @@ pub enum NativeOrEncoded<R> {
 	Native(R),
 	/// The encoded representation.
 	Encoded(Vec<u8>)
+}
+
+#[cfg(feature = "std")]
+impl<R> From<R> for NativeOrEncoded<R> {
+	fn from(val: R) -> Self {
+		Self::Native(val)
+	}
 }
 
 #[cfg(feature = "std")]
@@ -248,7 +275,7 @@ pub trait TypeId {
 /// A log level matching the one from `log` crate.
 ///
 /// Used internally by `sp_io::log` method.
-#[derive(Encode, Decode, sp_runtime_interface::pass_by::PassByEnum, Copy, Clone)]
+#[derive(Encode, Decode, PassByEnum, Copy, Clone)]
 pub enum LogLevel {
 	/// `Error` log level.
 	Error = 1,
@@ -321,6 +348,11 @@ pub fn to_substrate_wasm_fn_return_value(value: &impl Encode) -> u64 {
 
 	res
 }
+
+/// The void type - it cannot exist.
+// Oh rust, you crack me up...
+#[derive(Clone, Decode, Encode, Eq, PartialEq, RuntimeDebug)]
+pub enum Void {}
 
 /// Macro for creating `Maybe*` marker traits.
 ///

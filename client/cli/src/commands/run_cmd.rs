@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -21,13 +21,13 @@ use crate::error::{Error, Result};
 use crate::params::ImportParams;
 use crate::params::KeystoreParams;
 use crate::params::NetworkParams;
+use crate::params::OffchainWorkerParams;
 use crate::params::SharedParams;
 use crate::params::TransactionPoolParams;
-use crate::params::OffchainWorkerParams;
 use crate::CliConfiguration;
 use regex::Regex;
 use sc_service::{
-	config::{MultiaddrWithPeerId, PrometheusConfig, TransactionPoolOptions},
+	config::{BasePath, MultiaddrWithPeerId, PrometheusConfig, TransactionPoolOptions},
 	ChainSpec, Role,
 };
 use sc_telemetry::TelemetryEndpoints;
@@ -35,7 +35,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use structopt::StructOpt;
 
 /// The `run` command used to run a node.
-#[derive(Debug, StructOpt, Clone)]
+#[derive(Debug, StructOpt)]
 pub struct RunCmd {
 	/// Enable validator mode.
 	///
@@ -65,7 +65,7 @@ pub struct RunCmd {
 	pub sentry: Vec<MultiaddrWithPeerId>,
 
 	/// Disable GRANDPA voter when running in validator mode, otherwise disable the GRANDPA observer.
-	#[structopt(long = "no-grandpa")]
+	#[structopt(long)]
 	pub no_grandpa: bool,
 
 	/// Experimental: Run in light client mode.
@@ -75,7 +75,8 @@ pub struct RunCmd {
 	/// Listen to all RPC interfaces.
 	///
 	/// Default is local. Note: not all RPC methods are safe to be exposed publicly. Use an RPC proxy
-	/// server to filter out dangerous methods. More details: https://github.com/paritytech/substrate/wiki/Public-RPC.
+	/// server to filter out dangerous methods. More details:
+	/// <https://github.com/paritytech/substrate/wiki/Public-RPC>.
 	/// Use `--unsafe-rpc-external` to suppress the warning if you understand the risks.
 	#[structopt(long = "rpc-external")]
 	pub rpc_external: bool,
@@ -105,7 +106,7 @@ pub struct RunCmd {
 	/// Listen to all Websocket interfaces.
 	///
 	/// Default is local. Note: not all RPC methods are safe to be exposed publicly. Use an RPC proxy
-	/// server to filter out dangerous methods. More details: https://github.com/paritytech/substrate/wiki/Public-RPC.
+	/// server to filter out dangerous methods. More details: <https://github.com/paritytech/substrate/wiki/Public-RPC>.
 	/// Use `--unsafe-ws-external` to suppress the warning if you understand the risks.
 	#[structopt(long = "ws-external")]
 	pub ws_external: bool,
@@ -121,6 +122,10 @@ pub struct RunCmd {
 	/// Default is local.
 	#[structopt(long = "prometheus-external")]
 	pub prometheus_external: bool,
+
+	/// Specify IPC RPC server path
+	#[structopt(long = "ipc-path", value_name = "PATH")]
+	pub ipc_path: Option<String>,
 
 	/// Specify HTTP RPC server TCP port.
 	#[structopt(long = "rpc-port", value_name = "PORT")]
@@ -138,7 +143,7 @@ pub struct RunCmd {
 	///
 	/// A comma-separated list of origins (protocol://domain or special `null`
 	/// value). Value of `all` will disable origin validation. Default is to
-	/// allow localhost and https://polkadot.js.org origins. When running in
+	/// allow localhost and <https://polkadot.js.org> origins. When running in
 	/// --dev mode the default is to allow all origins.
 	#[structopt(long = "rpc-cors", value_name = "ORIGINS", parse(try_from_str = parse_cors))]
 	pub rpc_cors: Option<Cors>,
@@ -250,6 +255,16 @@ pub struct RunCmd {
 		conflicts_with_all = &[ "sentry", "public-addr" ]
 	)]
 	pub sentry_nodes: Vec<MultiaddrWithPeerId>,
+
+	/// Run a temporary node.
+	///
+	/// A temporary directory will be created to store the configuration and will be deleted
+	/// at the end of the process.
+	///
+	/// Note: the directory is random per process execution. This directory is used as base path
+	/// which includes: database, node key and keystore.
+	#[structopt(long, conflicts_with = "base-path")]
+	pub tmp: bool,
 }
 
 impl RunCmd {
@@ -311,7 +326,7 @@ impl CliConfiguration for RunCmd {
 			Error::Input(format!(
 				"Invalid node name '{}'. Reason: {}. If unsure, use none.",
 				name, msg
-			));
+		))
 		})?;
 
 		Ok(name)
@@ -368,7 +383,7 @@ impl CliConfiguration for RunCmd {
 		Ok(self.shared_params.dev || self.force_authoring)
 	}
 
-	fn prometheus_config(&self) -> Result<Option<PrometheusConfig>> {
+	fn prometheus_config(&self, default_listen_port: u16) -> Result<Option<PrometheusConfig>> {
 		Ok(if self.no_prometheus {
 			None
 		} else {
@@ -379,7 +394,10 @@ impl CliConfiguration for RunCmd {
 			};
 
 			Some(PrometheusConfig::new_with_default_registry(
-				SocketAddr::new(interface.into(), self.prometheus_port.unwrap_or(9615))
+				SocketAddr::new(
+					interface.into(),
+					self.prometheus_port.unwrap_or(default_listen_port),
+				)
 			))
 		})
 	}
@@ -413,7 +431,7 @@ impl CliConfiguration for RunCmd {
 			.into())
 	}
 
-	fn rpc_http(&self) -> Result<Option<SocketAddr>> {
+	fn rpc_http(&self, default_listen_port: u16) -> Result<Option<SocketAddr>> {
 		let interface = rpc_interface(
 			self.rpc_external,
 			self.unsafe_rpc_external,
@@ -421,18 +439,22 @@ impl CliConfiguration for RunCmd {
 			self.validator
 		)?;
 
-		Ok(Some(SocketAddr::new(interface, self.rpc_port.unwrap_or(9933))))
+		Ok(Some(SocketAddr::new(interface, self.rpc_port.unwrap_or(default_listen_port))))
 	}
 
-	fn rpc_ws(&self) -> Result<Option<SocketAddr>> {
+	fn rpc_ipc(&self) -> Result<Option<String>> {
+		Ok(self.ipc_path.clone())
+	}
+
+	fn rpc_ws(&self, default_listen_port: u16) -> Result<Option<SocketAddr>> {
 		let interface = rpc_interface(
 			self.ws_external,
 			self.unsafe_ws_external,
 			self.rpc_methods,
-			self.validator
+			self.validator,
 		)?;
 
-		Ok(Some(SocketAddr::new(interface, self.ws_port.unwrap_or(9944))))
+		Ok(Some(SocketAddr::new(interface, self.ws_port.unwrap_or(default_listen_port))))
 	}
 
 	fn rpc_methods(&self) -> Result<sc_service::config::RpcMethods> {
@@ -445,6 +467,14 @@ impl CliConfiguration for RunCmd {
 
 	fn max_runtime_instances(&self) -> Result<Option<usize>> {
 		Ok(self.max_runtime_instances.map(|x| x.min(256)))
+	}
+
+	fn base_path(&self) -> Result<Option<BasePath>> {
+		Ok(if self.tmp {
+			Some(BasePath::new_temp_dir()?)
+		} else {
+			self.shared_params().base_path()
+		})
 	}
 }
 
@@ -584,7 +614,9 @@ mod tests {
 
 	#[test]
 	fn tests_node_name_bad() {
-		assert!(is_node_name_valid("long names are not very cool for the ui").is_err());
+		assert!(is_node_name_valid(
+			"very very long names are really not very cool for the ui at all, really they're not"
+		).is_err());
 		assert!(is_node_name_valid("Dots.not.Ok").is_err());
 		assert!(is_node_name_valid("http://visit.me").is_err());
 		assert!(is_node_name_valid("https://visit.me").is_err());

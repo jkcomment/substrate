@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +18,8 @@
 //! Tracks offline validators.
 
 use std::collections::HashMap;
-use std::time::{Instant, Duration};
+use std::time::Duration;
+use wasm_timer::Instant;
 
 // time before we report a validator.
 const REPORT_TIME: Duration = Duration::from_secs(60 * 5);

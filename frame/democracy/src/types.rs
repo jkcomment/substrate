@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -194,24 +194,6 @@ impl<BlockNumber, Hash, Balance: Default> ReferendumInfo<BlockNumber, Hash, Bala
 	) -> Self {
 		let s = ReferendumStatus{ end, proposal_hash, threshold, delay, tally: Tally::default() };
 		ReferendumInfo::Ongoing(s)
-	}
-}
-
-/// State of a proxy voting account.
-#[derive(Clone, Eq, PartialEq, Encode, Decode, RuntimeDebug)]
-pub enum ProxyState<AccountId> {
-	/// Account is open to becoming a proxy but is not yet assigned.
-	Open(AccountId),
-	/// Account is actively being a proxy.
-	Active(AccountId),
-}
-
-impl<AccountId> ProxyState<AccountId> {
-	pub (crate) fn as_active(self) -> Option<AccountId> {
-		match self {
-			ProxyState::Active(a) => Some(a),
-			ProxyState::Open(_) => None,
-		}
 	}
 }
 

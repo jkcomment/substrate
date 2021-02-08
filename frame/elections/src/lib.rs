@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +15,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! # WARNING: NOT ACTIVELY MAINTAINED
+//!
+//! This pallet is currently not maintained and should not be used in production until further
+//! notice.
+//!
+//! ---
+//!
 //! Election module for stake-weighted membership selection of a collective.
 //!
 //! The composition of a set of account IDs works according to one or more approval votes
@@ -34,11 +41,11 @@ use frame_support::{
 	weights::{Weight, DispatchClass},
 	traits::{
 		Currency, ExistenceRequirement, Get, LockableCurrency, LockIdentifier, BalanceStatus,
-		OnUnbalanced, ReservableCurrency, WithdrawReason, WithdrawReasons, ChangeMembers,
+		OnUnbalanced, ReservableCurrency, WithdrawReasons, ChangeMembers,
 	}
 };
 use codec::{Encode, Decode};
-use frame_system::{self as system, ensure_signed, ensure_root};
+use frame_system::{ensure_signed, ensure_root};
 
 mod mock;
 mod tests;
@@ -132,9 +139,9 @@ pub const VOTER_SET_SIZE: usize = 64;
 /// NUmber of approvals grouped in one chunk.
 pub const APPROVAL_SET_SIZE: usize = 8;
 
-type BalanceOf<T> = <<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
+type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 type NegativeImbalanceOf<T> =
-	<<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::NegativeImbalance;
+	<<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::NegativeImbalance;
 
 /// Index used to access chunks.
 type SetIndex = u32;
@@ -145,8 +152,8 @@ type ApprovalFlag = u32;
 /// Number of approval flags that can fit into [`ApprovalFlag`] type.
 const APPROVAL_FLAG_LEN: usize = 32;
 
-pub trait Trait: frame_system::Trait {
-	type Event: From<Event<Self>> + Into<<Self as frame_system::Trait>::Event>;
+pub trait Config: frame_system::Config {
+	type Event: From<Event<Self>> + Into<<Self as frame_system::Config>::Event>;
 
 	/// Identifier for the elections pallet's lock
 	type ModuleId: Get<LockIdentifier>;
@@ -211,7 +218,7 @@ pub trait Trait: frame_system::Trait {
 }
 
 decl_storage! {
-	trait Store for Module<T: Trait> as Elections {
+	trait Store for Module<T: Config> as Elections {
 		// ---- parameters
 
 		/// How long to give each top candidate to present themselves after the vote ends.
@@ -237,16 +244,25 @@ decl_storage! {
 		// bit-wise manner. In order to get a human-readable representation (`Vec<bool>`), use
 		// [`all_approvals_of`]. Furthermore, each vector of scalars is chunked with the cap of
 		// `APPROVAL_SET_SIZE`.
+		///
+		/// TWOX-NOTE: SAFE as `AccountId` is a crypto hash and `SetIndex` is not
+		/// attacker-controlled.
 		pub ApprovalsOf get(fn approvals_of):
 			map hasher(twox_64_concat) (T::AccountId, SetIndex) => Vec<ApprovalFlag>;
 		/// The vote index and list slot that the candidate `who` was registered or `None` if they
 		/// are not currently registered.
+		///
+		/// TWOX-NOTE: SAFE as `AccountId` is a crypto hash.
 		pub RegisterInfoOf get(fn candidate_reg_info):
 			map hasher(twox_64_concat) T::AccountId => Option<(VoteIndex, u32)>;
 		/// Basic information about a voter.
+		///
+		/// TWOX-NOTE: SAFE as `AccountId` is a crypto hash.
 		pub VoterInfoOf get(fn voter_info):
 			map hasher(twox_64_concat) T::AccountId => Option<VoterInfo<BalanceOf<T>>>;
 		/// The present voter list (chunked and capped at [`VOTER_SET_SIZE`]).
+		///
+		/// TWOX-NOTE: OKAY ― `SetIndex` is not user-controlled data.
 		pub Voters get(fn voters): map hasher(twox_64_concat) SetIndex => Vec<Option<T::AccountId>>;
 		/// the next free set to store a voter in. This will keep growing.
 		pub NextVoterSet get(fn next_nonfull_voter_set): SetIndex = 0;
@@ -265,16 +281,12 @@ decl_storage! {
 		/// of each entry; It may be the direct summed approval stakes, or a weighted version of it.
 		/// Sorted from low to high.
 		pub Leaderboard get(fn leaderboard): Option<Vec<(BalanceOf<T>, T::AccountId)> >;
-
-		/// Who is able to vote for whom. Value is the fund-holding account, key is the
-		/// vote-transaction-sending account.
-		pub Proxy get(fn proxy): map hasher(blake2_128_concat) T::AccountId => Option<T::AccountId>;
 	}
 }
 
 decl_error! {
 	/// Error for the elections module.
-	pub enum Error for Module<T: Trait> {
+	pub enum Error for Module<T: Config> {
 		/// Reporter must be a voter.
 		NotVoter,
 		/// Target for inactivity cleanup must be active.
@@ -283,8 +295,6 @@ decl_error! {
 		CannotReapPresenting,
 		/// Cannot reap during grace period.
 		ReapGrace,
-		/// Not a proxy.
-		NotProxy,
 		/// Invalid reporter index.
 		InvalidReporterIndex,
 		/// Invalid target index.
@@ -335,7 +345,7 @@ decl_error! {
 }
 
 decl_module! {
-	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
+	pub struct Module<T: Config> for enum Call where origin: T::Origin {
 		type Error = Error<T>;
 
 		/// How much should be locked up in order to submit one's candidacy. A reasonable
@@ -418,23 +428,6 @@ decl_module! {
 			#[compact] value: BalanceOf<T>,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			Self::do_set_approvals(who, votes, index, hint, value)
-		}
-
-		/// Set candidate approvals from a proxy. Approval slots stay valid as long as candidates in
-		/// those slots are registered.
-		///
-		/// # <weight>
-		/// - Same as `set_approvals` with one additional storage read.
-		/// # </weight>
-		#[weight = 2_500_000_000]
-		fn proxy_set_approvals(origin,
-			votes: Vec<bool>,
-			#[compact] index: VoteIndex,
-			hint: SetIndex,
-			#[compact] value: BalanceOf<T>,
-		) -> DispatchResult {
-			let who = Self::proxy(ensure_signed(origin)?).ok_or(Error::<T>::NotProxy)?;
 			Self::do_set_approvals(who, votes, index, hint, value)
 		}
 
@@ -713,19 +706,20 @@ decl_module! {
 }
 
 decl_event!(
-	pub enum Event<T> where <T as frame_system::Trait>::AccountId {
-		/// reaped voter, reaper
+	pub enum Event<T> where <T as frame_system::Config>::AccountId {
+		/// Reaped \[voter, reaper\].
 		VoterReaped(AccountId, AccountId),
-		/// slashed reaper
+		/// Slashed \[reaper\].
 		BadReaperSlashed(AccountId),
-		/// A tally (for approval votes of seat(s)) has started.
+		/// A tally (for approval votes of \[seats\]) has started.
 		TallyStarted(u32),
-		/// A tally (for approval votes of seat(s)) has ended (with one or more new members).
+		/// A tally (for approval votes of seat(s)) has ended (with one or more new members). 
+		/// \[incoming, outgoing\]
 		TallyFinalized(Vec<AccountId>, Vec<AccountId>),
 	}
 );
 
-impl<T: Trait> Module<T> {
+impl<T: Config> Module<T> {
 	// exposed immutables.
 
 	/// True if we're currently in a presentation period.
@@ -877,7 +871,7 @@ impl<T: Trait> Module<T> {
 						let imbalance = T::Currency::withdraw(
 							&who,
 							T::VotingFee::get(),
-							WithdrawReason::Fee.into(),
+							WithdrawReasons::FEE,
 							ExistenceRequirement::KeepAlive,
 						)?;
 						T::BadVoterIndex::on_unbalanced(imbalance);

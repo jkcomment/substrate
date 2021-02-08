@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -19,14 +19,14 @@
 //! Substrate Client data backend
 
 use std::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use sp_core::ChangesTrieConfigurationRange;
-use sp_core::offchain::{OffchainStorage,storage::OffchainOverlayedChanges};
+use sp_core::offchain::OffchainStorage;
 use sp_runtime::{generic::BlockId, Justification, Storage};
 use sp_runtime::traits::{Block as BlockT, NumberFor, HashFor};
 use sp_state_machine::{
 	ChangesTrieState, ChangesTrieStorage as StateChangesTrieStorage, ChangesTrieTransaction,
-	StorageCollection, ChildStorageCollection,
+	StorageCollection, ChildStorageCollection, OffchainChangesCollection,
 };
 use sp_storage::{StorageData, StorageKey, PrefixedStorageKey, ChildInfo};
 use crate::{
@@ -67,8 +67,10 @@ pub struct ImportSummary<Block: BlockT> {
 	pub is_new_best: bool,
 	/// Optional storage changes.
 	pub storage_changes: Option<(StorageCollection, ChildStorageCollection)>,
-	/// Blocks that got retracted because of this one got imported.
-	pub retracted: Vec<Block::Hash>,
+	/// Tree route from old best to new best.
+	///
+	/// If `None`, there was no re-org while importing.
+	pub tree_route: Option<sp_blockchain::TreeRoute<Block>>,
 }
 
 /// Import operation wrapper
@@ -172,7 +174,7 @@ pub trait BlockImportOperation<Block: BlockT> {
 	/// Write offchain storage changes to the database.
 	fn update_offchain_storage(
 		&mut self,
-		_offchain_update: OffchainOverlayedChanges,
+		_offchain_update: OffchainChangesCollection,
 	) -> sp_blockchain::Result<()> {
 		 Ok(())
 	}
@@ -416,7 +418,10 @@ pub trait Backend<Block: BlockT>: AuxStore + Send + Sync {
 	) -> sp_blockchain::Result<()>;
 
 	/// Commit block insertion.
-	fn commit_operation(&self, transaction: Self::BlockImportOperation) -> sp_blockchain::Result<()>;
+	fn commit_operation(
+		&self,
+		transaction: Self::BlockImportOperation,
+	) -> sp_blockchain::Result<()>;
 
 	/// Finalize block with given Id.
 	///
@@ -447,16 +452,17 @@ pub trait Backend<Block: BlockT>: AuxStore + Send + Sync {
 	/// Returns state backend with post-state of given block.
 	fn state_at(&self, block: BlockId<Block>) -> sp_blockchain::Result<Self::State>;
 
-	/// Attempts to revert the chain by `n` blocks. If `revert_finalized` is set
-	/// it will attempt to revert past any finalized block, this is unsafe and
-	/// can potentially leave the node in an inconsistent state.
+	/// Attempts to revert the chain by `n` blocks. If `revert_finalized` is set it will attempt to
+	/// revert past any finalized block, this is unsafe and can potentially leave the node in an
+	/// inconsistent state.
 	///
-	/// Returns the number of blocks that were successfully reverted.
+	/// Returns the number of blocks that were successfully reverted and the list of finalized
+	/// blocks that has been reverted.
 	fn revert(
 		&self,
 		n: NumberFor<Block>,
 		revert_finalized: bool,
-	) -> sp_blockchain::Result<NumberFor<Block>>;
+	) -> sp_blockchain::Result<(NumberFor<Block>, HashSet<Block::Hash>)>;
 
 	/// Insert auxiliary data into key-value store.
 	fn insert_aux<
@@ -529,4 +535,22 @@ pub fn changes_tries_state_at_block<'a, Block: BlockT>(
 		Some(config) => Ok(Some(ChangesTrieState::new(config, config_range.zero.0, storage.storage()))),
 		None => Ok(None),
 	}
+}
+
+/// Provide CHT roots. These are stored on a light client and generated dynamically on a full
+/// client.
+pub trait ProvideChtRoots<Block: BlockT> {
+	/// Get headers CHT root for given block. Returns None if the block is not a part of any CHT.
+	fn header_cht_root(
+		&self,
+		cht_size: NumberFor<Block>,
+		block: NumberFor<Block>,
+	) -> sp_blockchain::Result<Option<Block::Hash>>;
+
+	/// Get changes trie CHT root for given block. Returns None if the block is not a part of any CHT.
+	fn changes_trie_cht_root(
+		&self,
+		cht_size: NumberFor<Block>,
+		block: NumberFor<Block>,
+	) -> sp_blockchain::Result<Option<Block::Hash>>;
 }

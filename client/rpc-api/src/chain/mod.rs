@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -21,7 +21,6 @@
 pub mod error;
 
 use jsonrpc_core::Result as RpcResult;
-use jsonrpc_core::futures::Future;
 use jsonrpc_derive::rpc;
 use jsonrpc_pubsub::{typed::Subscriber, SubscriptionId};
 use sp_rpc::{number::NumberOrHex, list::ListOrValue};
@@ -49,7 +48,7 @@ pub trait ChainApi<Number, Hash, Header, SignedBlock> {
 	#[rpc(name = "chain_getBlockHash", alias("chain_getHead"))]
 	fn block_hash(
 		&self,
-		hash: Option<ListOrValue<NumberOrHex<Number>>>,
+		hash: Option<ListOrValue<NumberOrHex>>,
 	) -> Result<ListOrValue<Option<Hash>>>;
 
 	/// Get hash of the last finalized block in the canon chain.

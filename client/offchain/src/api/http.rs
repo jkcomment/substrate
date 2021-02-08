@@ -1,18 +1,20 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! This module is composed of two structs: [`HttpApi`] and [`HttpWorker`]. Calling the [`http`]
 //! function returns a pair of [`HttpApi`] and [`HttpWorker`] that share some state.
@@ -31,11 +33,24 @@ use fnv::FnvHashMap;
 use futures::{prelude::*, future, channel::mpsc};
 use log::error;
 use sp_core::offchain::{HttpRequestId, Timestamp, HttpRequestStatus, HttpError};
-use std::{fmt, io::Read as _, mem, pin::Pin, task::Context, task::Poll};
+use std::{convert::TryFrom, fmt, io::Read as _, pin::Pin, task::{Context, Poll}};
 use sp_utils::mpsc::{tracing_unbounded, TracingUnboundedSender, TracingUnboundedReceiver};
+use std::sync::Arc;
+use hyper::{Client as HyperClient, Body, client};
+use hyper_rustls::HttpsConnector;
+
+/// Wrapper struct used for keeping the hyper_rustls client running.
+#[derive(Clone)]
+pub struct SharedClient(Arc<HyperClient<HttpsConnector<client::HttpConnector>, Body>>);
+
+impl SharedClient {
+	pub fn new() -> Self {
+		Self(Arc::new(HyperClient::builder().build(HttpsConnector::new())))
+	}
+}
 
 /// Creates a pair of [`HttpApi`] and [`HttpWorker`].
-pub fn http() -> (HttpApi, HttpWorker) {
+pub fn http(shared_client: SharedClient) -> (HttpApi, HttpWorker) {
 	let (to_worker, from_api) = tracing_unbounded("mpsc_ocw_to_worker");
 	let (to_api, from_worker) = tracing_unbounded("mpsc_ocw_to_api");
 
@@ -51,7 +66,7 @@ pub fn http() -> (HttpApi, HttpWorker) {
 	let engine = HttpWorker {
 		to_api,
 		from_api,
-		http_client: hyper::Client::builder().build(hyper_rustls::HttpsConnector::new()),
+		http_client: shared_client.0,
 		requests: Vec::new(),
 	};
 
@@ -151,8 +166,8 @@ impl HttpApi {
 			_ => return Err(())
 		};
 
-		let name = hyper::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| ())?;
-		let value = hyper::header::HeaderValue::from_str(value).map_err(|_| ())?;
+		let name = hyper::header::HeaderName::try_from(name).map_err(drop)?;
+		let value = hyper::header::HeaderValue::try_from(value).map_err(drop)?;
 		// Note that we're always appending headers and never replacing old values.
 		// We assume here that the user knows what they're doing.
 		request.headers_mut().append(name, value);
@@ -185,7 +200,7 @@ impl HttpApi {
 				future::MaybeDone::Done(Err(_)) => return Err(HttpError::IoError),
 				future::MaybeDone::Future(_) |
 				future::MaybeDone::Gone => {
-					debug_assert!(if let future::MaybeDone::Done(_) = deadline { true } else { false });
+					debug_assert!(matches!(deadline, future::MaybeDone::Done(..)));
 					return Err(HttpError::DeadlineReached)
 				}
 			};
@@ -347,7 +362,7 @@ impl HttpApi {
 				if let future::MaybeDone::Done(msg) = next_msg {
 					msg
 				} else {
-					debug_assert!(if let future::MaybeDone::Done(_) = deadline { true } else { false });
+					debug_assert!(matches!(deadline, future::MaybeDone::Done(..)));
 					continue
 				}
 			};
@@ -551,7 +566,7 @@ pub struct HttpWorker {
 	/// Used to receive messages from the `HttpApi`.
 	from_api: TracingUnboundedReceiver<ApiToWorker>,
 	/// The engine that runs HTTP requests.
-	http_client: hyper::Client<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>, hyper::Body>,
+	http_client: Arc<HyperClient<HttpsConnector<client::HttpConnector>, Body>>,
 	/// HTTP requests that are being worked on by the engine.
 	requests: Vec<(HttpRequestId, HttpWorkerRequest)>,
 }
@@ -585,25 +600,21 @@ impl Future for HttpWorker {
 			match request {
 				HttpWorkerRequest::Dispatched(mut future) => {
 					// Check for an HTTP response from the Internet.
-					let mut response = match Future::poll(Pin::new(&mut future), cx) {
+					let response = match Future::poll(Pin::new(&mut future), cx) {
 						Poll::Pending => {
 							me.requests.push((id, HttpWorkerRequest::Dispatched(future)));
 							continue
 						},
 						Poll::Ready(Ok(response)) => response,
-						Poll::Ready(Err(err)) => {
-							let _ = me.to_api.unbounded_send(WorkerToApi::Fail {
-								id,
-								error: err,
-							});
+						Poll::Ready(Err(error)) => {
+							let _ = me.to_api.unbounded_send(WorkerToApi::Fail { id, error });
 							continue;		// don't insert the request back
 						}
 					};
 
 					// We received a response! Decompose it into its parts.
-					let status_code = response.status();
-					let headers = mem::replace(response.headers_mut(), hyper::HeaderMap::new());
-					let body = response.into_body();
+					let (head, body) = response.into_parts();
+					let (status_code, headers) = (head.status, head.headers);
 
 					let (body_tx, body_rx) = mpsc::channel(3);
 					let _ = me.to_api.unbounded_send(WorkerToApi::Response {
@@ -689,29 +700,29 @@ impl fmt::Debug for HttpWorkerRequest {
 mod tests {
 	use core::convert::Infallible;
 	use crate::api::timestamp;
-	use super::http;
+	use super::{http, SharedClient};
 	use sp_core::offchain::{HttpError, HttpRequestId, HttpRequestStatus, Duration};
+	use futures::future;
+	use lazy_static::lazy_static;
+	
+	// Using lazy_static to avoid spawning lots of different SharedClients,
+	// as spawning a SharedClient is CPU-intensive and opens lots of fds.
+	lazy_static! {
+		static ref SHARED_CLIENT: SharedClient = SharedClient::new();
+	}
 
 	// Returns an `HttpApi` whose worker is ran in the background, and a `SocketAddr` to an HTTP
 	// server that runs in the background as well.
 	macro_rules! build_api_server {
 		() => {{
-			fn tokio_run<T>(future: impl std::future::Future<Output = T>) {
-				let _ = tokio::runtime::Runtime::new().unwrap().block_on(future);
-			}
-
-			// We spawn quite a bit of HTTP servers here due to how async API
-			// works for offchain workers, so be sure to raise the FD limit
-			// (particularly useful for macOS where the default soft limit may
-			// not be enough).
-			fdlimit::raise_fd_limit();
-
-			let (api, worker) = http();
-			std::thread::spawn(move || tokio_run(worker));
+			let hyper_client = SHARED_CLIENT.clone();
+			let (api, worker) = http(hyper_client.clone());
 
 			let (addr_tx, addr_rx) = std::sync::mpsc::channel();
 			std::thread::spawn(move || {
-				tokio_run(async move {
+				let mut rt = tokio::runtime::Runtime::new().unwrap();
+				let worker = rt.spawn(worker);
+				let server = rt.spawn(async move {
 					let server = hyper::Server::bind(&"127.0.0.1:0".parse().unwrap())
 						.serve(hyper::service::make_service_fn(|_| { async move {
 							Ok::<_, Infallible>(hyper::service::service_fn(move |_req| async move {
@@ -721,8 +732,9 @@ mod tests {
 							}))
 						}}));
 					let _ = addr_tx.send(server.local_addr());
-					server.await
+					server.await.map_err(drop)
 				});
+				let _ = rt.block_on(future::join(worker, server));
 			});
 			(api, addr_rx.recv().unwrap())
 		}};
@@ -891,10 +903,10 @@ mod tests {
 	#[test]
 	fn response_headers_invalid_call() {
 		let (mut api, addr) = build_api_server!();
-		assert!(api.response_headers(HttpRequestId(0xdead)).is_empty());
+		assert_eq!(api.response_headers(HttpRequestId(0xdead)), &[]);
 
 		let id = api.request_start("POST", &format!("http://{}", addr)).unwrap();
-		assert!(api.response_headers(id).is_empty());
+		assert_eq!(api.response_headers(id), &[]);
 
 		let id = api.request_start("POST", &format!("http://{}", addr)).unwrap();
 		api.request_write_body(id, &[], None).unwrap();
@@ -904,12 +916,12 @@ mod tests {
 
 		let id = api.request_start("GET", &format!("http://{}", addr)).unwrap();
 		api.response_wait(&[id], None);
-		assert!(!api.response_headers(id).is_empty());
+		assert_ne!(api.response_headers(id), &[]);
 
 		let id = api.request_start("GET", &format!("http://{}", addr)).unwrap();
 		let mut buf = [0; 128];
 		while api.response_read_body(id, &mut buf, None).unwrap() != 0 {}
-		assert!(api.response_headers(id).is_empty());
+		assert_eq!(api.response_headers(id), &[]);
 	}
 
 	#[test]
@@ -917,11 +929,11 @@ mod tests {
 		let (mut api, addr) = build_api_server!();
 
 		let id = api.request_start("POST", &format!("http://{}", addr)).unwrap();
-		assert!(api.response_headers(id).is_empty());
+		assert_eq!(api.response_headers(id), &[]);
 
 		let id = api.request_start("POST", &format!("http://{}", addr)).unwrap();
 		api.request_add_header(id, "Foo", "Bar").unwrap();
-		assert!(api.response_headers(id).is_empty());
+		assert_eq!(api.response_headers(id), &[]);
 
 		let id = api.request_start("GET", &format!("http://{}", addr)).unwrap();
 		api.request_add_header(id, "Foo", "Bar").unwrap();
@@ -930,7 +942,7 @@ mod tests {
 		// where we haven't received any response yet. This test can theoretically fail if the
 		// HTTP response comes back faster than the kernel schedules our thread, but that is highly
 		// unlikely.
-		assert!(api.response_headers(id).is_empty());
+		assert_eq!(api.response_headers(id), &[]);
 	}
 
 	#[test]

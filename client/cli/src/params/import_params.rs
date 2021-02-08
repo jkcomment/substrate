@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -17,17 +17,18 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::arg_enums::{
-	ExecutionStrategy, TracingReceiver, WasmExecutionMethod,
-	DEFAULT_EXECUTION_BLOCK_CONSTRUCTION, DEFAULT_EXECUTION_IMPORT_BLOCK,
+	ExecutionStrategy, WasmExecutionMethod, DEFAULT_EXECUTION_BLOCK_CONSTRUCTION,
+	DEFAULT_EXECUTION_IMPORT_BLOCK, DEFAULT_EXECUTION_IMPORT_BLOCK_VALIDATOR,
 	DEFAULT_EXECUTION_OFFCHAIN_WORKER, DEFAULT_EXECUTION_OTHER, DEFAULT_EXECUTION_SYNCING,
 };
 use crate::params::DatabaseParams;
 use crate::params::PruningParams;
 use sc_client_api::execution_extensions::ExecutionStrategies;
 use structopt::StructOpt;
+use std::path::PathBuf;
 
 /// Parameters for block import.
-#[derive(Debug, StructOpt, Clone)]
+#[derive(Debug, StructOpt)]
 pub struct ImportParams {
 	#[allow(missing_docs)]
 	#[structopt(flatten)]
@@ -55,6 +56,12 @@ pub struct ImportParams {
 	)]
 	pub wasm_method: WasmExecutionMethod,
 
+	/// Specify the path where local WASM runtimes are stored.
+	///
+	/// These runtimes will override on-chain runtimes when the version matches.
+	#[structopt(long, value_name = "PATH", parse(from_os_str))]
+	pub wasm_runtime_overrides: Option<PathBuf>,
+
 	#[allow(missing_docs)]
 	#[structopt(flatten)]
 	pub execution_strategies: ExecutionStrategiesParams,
@@ -66,32 +73,9 @@ pub struct ImportParams {
 		default_value = "67108864"
 	)]
 	pub state_cache_size: usize,
-
-	/// Comma separated list of targets for tracing.
-	#[structopt(long = "tracing-targets", value_name = "TARGETS")]
-	pub tracing_targets: Option<String>,
-
-	/// Receiver to process tracing messages.
-	#[structopt(
-		long = "tracing-receiver",
-		value_name = "RECEIVER",
-		possible_values = &TracingReceiver::variants(),
-		case_insensitive = true,
-		default_value = "Log"
-	)]
-	pub tracing_receiver: TracingReceiver,
 }
 
 impl ImportParams {
-	/// Receiver to process tracing messages.
-	pub fn tracing_receiver(&self) -> sc_service::TracingReceiver {
-		self.tracing_receiver.clone().into()
-	}
-
-	/// Comma separated list of targets for tracing.
-	pub fn tracing_targets(&self) -> Option<String> {
-		self.tracing_targets.clone()
-	}
 
 	/// Specify the state cache size.
 	pub fn state_cache_size(&self) -> usize {
@@ -103,23 +87,34 @@ impl ImportParams {
 		self.wasm_method.into()
 	}
 
+	/// Enable overriding on-chain WASM with locally-stored WASM
+	/// by specifying the path where local WASM is stored.
+	pub fn wasm_runtime_overrides(&self) -> Option<PathBuf> {
+		self.wasm_runtime_overrides.clone()
+	}
+
 	/// Get execution strategies for the parameters
-	pub fn execution_strategies(
-		&self,
-		is_dev: bool,
-	) -> ExecutionStrategies {
+	pub fn execution_strategies(&self, is_dev: bool, is_validator: bool) -> ExecutionStrategies {
 		let exec = &self.execution_strategies;
-		let exec_all_or = |strat: ExecutionStrategy, default: ExecutionStrategy| {
-			exec.execution.unwrap_or(if strat == default && is_dev {
+		let exec_all_or = |strat: Option<ExecutionStrategy>, default: ExecutionStrategy| {
+			let default = if is_dev {
 				ExecutionStrategy::Native
 			} else {
-				strat
-			}).into()
+				default
+			};
+
+			exec.execution.unwrap_or_else(|| strat.unwrap_or(default)).into()
+		};
+
+		let default_execution_import_block = if is_validator {
+			DEFAULT_EXECUTION_IMPORT_BLOCK_VALIDATOR
+		} else {
+			DEFAULT_EXECUTION_IMPORT_BLOCK
 		};
 
 		ExecutionStrategies {
 			syncing: exec_all_or(exec.execution_syncing, DEFAULT_EXECUTION_SYNCING),
-			importing: exec_all_or(exec.execution_import_block, DEFAULT_EXECUTION_IMPORT_BLOCK),
+			importing: exec_all_or(exec.execution_import_block, default_execution_import_block),
 			block_construction:
 				exec_all_or(exec.execution_block_construction, DEFAULT_EXECUTION_BLOCK_CONSTRUCTION),
 			offchain_worker:
@@ -130,27 +125,27 @@ impl ImportParams {
 }
 
 /// Execution strategies parameters.
-#[derive(Debug, StructOpt, Clone)]
+#[derive(Debug, StructOpt)]
 pub struct ExecutionStrategiesParams {
-	/// The means of execution used when calling into the runtime while syncing blocks.
+	/// The means of execution used when calling into the runtime for importing blocks as
+	/// part of an initial sync.
 	#[structopt(
 		long = "execution-syncing",
 		value_name = "STRATEGY",
 		possible_values = &ExecutionStrategy::variants(),
 		case_insensitive = true,
-		default_value = DEFAULT_EXECUTION_SYNCING.as_str(),
 	)]
-	pub execution_syncing: ExecutionStrategy,
+	pub execution_syncing: Option<ExecutionStrategy>,
 
-	/// The means of execution used when calling into the runtime while importing blocks.
+	/// The means of execution used when calling into the runtime for general block import
+	/// (including locally authored blocks).
 	#[structopt(
 		long = "execution-import-block",
 		value_name = "STRATEGY",
 		possible_values = &ExecutionStrategy::variants(),
 		case_insensitive = true,
-		default_value = DEFAULT_EXECUTION_IMPORT_BLOCK.as_str(),
 	)]
-	pub execution_import_block: ExecutionStrategy,
+	pub execution_import_block: Option<ExecutionStrategy>,
 
 	/// The means of execution used when calling into the runtime while constructing blocks.
 	#[structopt(
@@ -158,9 +153,8 @@ pub struct ExecutionStrategiesParams {
 		value_name = "STRATEGY",
 		possible_values = &ExecutionStrategy::variants(),
 		case_insensitive = true,
-		default_value = DEFAULT_EXECUTION_BLOCK_CONSTRUCTION.as_str(),
 	)]
-	pub execution_block_construction: ExecutionStrategy,
+	pub execution_block_construction: Option<ExecutionStrategy>,
 
 	/// The means of execution used when calling into the runtime while using an off-chain worker.
 	#[structopt(
@@ -168,9 +162,8 @@ pub struct ExecutionStrategiesParams {
 		value_name = "STRATEGY",
 		possible_values = &ExecutionStrategy::variants(),
 		case_insensitive = true,
-		default_value = DEFAULT_EXECUTION_OFFCHAIN_WORKER.as_str(),
 	)]
-	pub execution_offchain_worker: ExecutionStrategy,
+	pub execution_offchain_worker: Option<ExecutionStrategy>,
 
 	/// The means of execution used when calling into the runtime while not syncing, importing or constructing blocks.
 	#[structopt(
@@ -178,9 +171,8 @@ pub struct ExecutionStrategiesParams {
 		value_name = "STRATEGY",
 		possible_values = &ExecutionStrategy::variants(),
 		case_insensitive = true,
-		default_value = DEFAULT_EXECUTION_OTHER.as_str(),
 	)]
-	pub execution_other: ExecutionStrategy,
+	pub execution_other: Option<ExecutionStrategy>,
 
 	/// The execution strategy that should be used by all execution contexts.
 	#[structopt(

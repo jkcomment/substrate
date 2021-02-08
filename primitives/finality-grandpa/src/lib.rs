@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,6 +29,8 @@ use codec::{Encode, Decode, Input, Codec};
 use sp_runtime::{ConsensusEngineId, RuntimeDebug, traits::NumberFor};
 use sp_std::borrow::Cow;
 use sp_std::vec::Vec;
+#[cfg(feature = "std")]
+use sp_keystore::{SyncCryptoStorePtr, SyncCryptoStore};
 
 #[cfg(feature = "std")]
 use log::debug;
@@ -100,7 +102,7 @@ pub enum ConsensusLog<N: Codec> {
 	/// This should be a pure function: i.e. as long as the runtime can interpret
 	/// the digest type it should return the same result regardless of the current
 	/// state.
-	#[codec(index = "1")]
+	#[codec(index = 1)]
 	ScheduledChange(ScheduledChange<N>),
 	/// Force an authority set change.
 	///
@@ -116,18 +118,18 @@ pub enum ConsensusLog<N: Codec> {
 	/// This should be a pure function: i.e. as long as the runtime can interpret
 	/// the digest type it should return the same result regardless of the current
 	/// state.
-	#[codec(index = "2")]
+	#[codec(index = 2)]
 	ForcedChange(N, ScheduledChange<N>),
 	/// Note that the authority with given index is disabled until the next change.
-	#[codec(index = "3")]
+	#[codec(index = 3)]
 	OnDisabled(AuthorityIndex),
 	/// A signal to pause the current authority set after the given delay.
 	/// After finalizing the block at _delay_ the authorities should stop voting.
-	#[codec(index = "4")]
+	#[codec(index = 4)]
 	Pause(N),
 	/// A signal to resume the current authority set after the given delay.
 	/// After authoring the block at _delay_ the authorities should resume voting.
-	#[codec(index = "5")]
+	#[codec(index = 5)]
 	Resume(N),
 }
 
@@ -250,11 +252,19 @@ impl<H, N> Equivocation<H, N> {
 			Equivocation::Precommit(ref equivocation) => &equivocation.identity,
 		}
 	}
+
+	/// Returns the round number when the equivocation happened.
+	pub fn round_number(&self) -> RoundNumber {
+		match self {
+			Equivocation::Prevote(ref equivocation) => equivocation.round_number,
+			Equivocation::Precommit(ref equivocation) => equivocation.round_number,
+		}
+	}
 }
 
 /// Verifies the equivocation proof by making sure that both votes target
 /// different blocks and that its signatures are valid.
-pub fn check_equivocation_proof<H, N>(report: EquivocationProof<H, N>) -> Result<(), ()>
+pub fn check_equivocation_proof<H, N>(report: EquivocationProof<H, N>) -> bool
 where
 	H: Clone + Encode + PartialEq,
 	N: Clone + Encode + PartialEq,
@@ -267,27 +277,27 @@ where
 			if $equivocation.first.0.target_hash == $equivocation.second.0.target_hash &&
 				$equivocation.first.0.target_number == $equivocation.second.0.target_number
 			{
-				return Err(());
+				return false;
 			}
 
 			// check signatures on both votes are valid
-			check_message_signature(
+			let valid_first = check_message_signature(
 				&$message($equivocation.first.0),
 				&$equivocation.identity,
 				&$equivocation.first.1,
 				$equivocation.round_number,
 				report.set_id,
-			)?;
+			);
 
-			check_message_signature(
+			let valid_second = check_message_signature(
 				&$message($equivocation.second.0),
 				&$equivocation.identity,
 				&$equivocation.second.1,
 				$equivocation.round_number,
 				report.set_id,
-			)?;
+			);
 
-			return Ok(());
+			return valid_first && valid_second;
 		};
 	}
 
@@ -329,7 +339,7 @@ pub fn check_message_signature<H, N>(
 	signature: &AuthoritySignature,
 	round: RoundNumber,
 	set_id: SetId,
-) -> Result<(), ()>
+) -> bool
 where
 	H: Encode,
 	N: Encode,
@@ -348,7 +358,7 @@ pub fn check_message_signature_with_buffer<H, N>(
 	round: RoundNumber,
 	set_id: SetId,
 	buf: &mut Vec<u8>,
-) -> Result<(), ()>
+) -> bool
 where
 	H: Encode,
 	N: Encode,
@@ -357,38 +367,46 @@ where
 
 	localized_payload_with_buffer(round, set_id, message, buf);
 
-	if id.verify(&buf, signature) {
-		Ok(())
-	} else {
+	let valid = id.verify(&buf, signature);
+
+	if !valid {
 		#[cfg(feature = "std")]
 		debug!(target: "afg", "Bad signature on message from {:?}", id);
-
-		Err(())
 	}
+
+	valid
 }
 
 /// Localizes the message to the given set and round and signs the payload.
 #[cfg(feature = "std")]
 pub fn sign_message<H, N>(
+	keystore: SyncCryptoStorePtr,
 	message: grandpa::Message<H, N>,
-	pair: &AuthorityPair,
+	public: AuthorityId,
 	round: RoundNumber,
 	set_id: SetId,
-) -> grandpa::SignedMessage<H, N, AuthoritySignature, AuthorityId>
+) -> Option<grandpa::SignedMessage<H, N, AuthoritySignature, AuthorityId>>
 where
 	H: Encode,
 	N: Encode,
 {
-	use sp_core::Pair;
+	use sp_core::crypto::Public;
+	use sp_application_crypto::AppKey;
+	use sp_std::convert::TryInto;
 
 	let encoded = localized_payload(round, set_id, &message);
-	let signature = pair.sign(&encoded[..]);
+	let signature = SyncCryptoStore::sign_with(
+		&*keystore,
+		AuthorityId::ID,
+		&public.to_public_crypto_pair(),
+		&encoded[..],
+	).ok()?.try_into().ok()?;
 
-	grandpa::SignedMessage {
+	Some(grandpa::SignedMessage {
 		message,
 		signature,
-		id: pair.public(),
-	}
+		id: public,
+	})
 }
 
 /// WASM function call to check for pending changes.
@@ -488,16 +506,15 @@ sp_api::decl_runtime_apis! {
 		/// is finalized by the authorities from block B-1.
 		fn grandpa_authorities() -> AuthorityList;
 
-		/// Submits an extrinsic to report an equivocation. The caller must
-		/// provide the equivocation proof and a key ownership proof (should be
-		/// obtained using `generate_key_ownership_proof`). This method will
-		/// sign the extrinsic with any reporting keys available in the keystore
-		/// and will push the transaction to the pool. This method returns `None`
-		/// when creation of the extrinsic fails, either due to unavailability
-		/// of keys to sign, or because equivocation reporting is disabled for
-		/// the given runtime (i.e. this method is hardcoded to return `None`).
-		/// Only useful in an offchain context.
-		fn submit_report_equivocation_extrinsic(
+		/// Submits an unsigned extrinsic to report an equivocation. The caller
+		/// must provide the equivocation proof and a key ownership proof
+		/// (should be obtained using `generate_key_ownership_proof`). The
+		/// extrinsic will be unsigned and should only be accepted for local
+		/// authorship (not to be broadcast to the network). This method returns
+		/// `None` when creation of the extrinsic fails, e.g. if equivocation
+		/// reporting is disabled for the given runtime (i.e. this method is
+		/// hardcoded to return `None`). Only useful in an offchain context.
+		fn submit_report_equivocation_unsigned_extrinsic(
 			equivocation_proof: EquivocationProof<Block::Hash, NumberFor<Block>>,
 			key_owner_proof: OpaqueKeyOwnershipProof,
 		) -> Option<()>;

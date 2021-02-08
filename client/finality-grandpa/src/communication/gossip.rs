@@ -1,18 +1,20 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Gossip and politeness for polite-grandpa.
 //!
@@ -368,7 +370,7 @@ pub(super) struct NeighborPacket<N> {
 /// A versioned neighbor packet.
 #[derive(Debug, Encode, Decode)]
 pub(super) enum VersionedNeighborPacket<N> {
-	#[codec(index = "1")]
+	#[codec(index = 1)]
 	V1(NeighborPacket<N>),
 }
 
@@ -750,7 +752,11 @@ impl<Block: BlockT> Inner<Block> {
 					Round(1),
 				)),
 				Some(ref mut v) => if v.set_id == set_id {
-					if self.authorities != authorities {
+					let diff_authorities =
+						self.authorities.iter().collect::<HashSet<_>>() !=
+						authorities.iter().collect();
+
+					if diff_authorities {
 						debug!(target: "afg",
 							"Gossip validator noted set {:?} twice with different authorities. \
 							Was the authority set hard forked?",
@@ -829,7 +835,7 @@ impl<Block: BlockT> Inner<Block> {
 			return Action::Discard(cost::UNKNOWN_VOTER);
 		}
 
-		if let Err(()) = sp_finality_grandpa::check_message_signature(
+		if !sp_finality_grandpa::check_message_signature(
 			&full.message.message,
 			&full.message.id,
 			&full.message.signature,
@@ -918,7 +924,7 @@ impl<Block: BlockT> Inner<Block> {
 			PendingCatchUp::Processing { .. } => {
 				self.pending_catch_up = PendingCatchUp::None;
 			},
-			state => trace!(target: "afg",
+			state => debug!(target: "afg",
 				"Noted processed catch up message when state was: {:?}",
 				state,
 			),
@@ -1039,7 +1045,7 @@ impl<Block: BlockT> Inner<Block> {
 				let (catch_up_allowed, catch_up_report) = self.note_catch_up_request(who, &request);
 
 				if catch_up_allowed {
-					trace!(target: "afg", "Sending catch-up request for round {} to {}",
+					debug!(target: "afg", "Sending catch-up request for round {} to {}",
 						   round,
 						   who,
 					);
@@ -1409,7 +1415,7 @@ impl<Block: BlockT> GossipValidator<Block> {
 				}
 				Err(e) => {
 					message_name = None;
-					debug!(target: "afg", "Error decoding message: {}", e.what());
+					debug!(target: "afg", "Error decoding message: {}", e);
 					telemetry!(CONSENSUS_DEBUG; "afg.err_decoding_msg"; "" => "");
 
 					let len = std::cmp::min(i32::max_value() as usize, data.len()) as i32;
@@ -2620,12 +2626,12 @@ mod tests {
 	fn allow_noting_different_authorities_for_same_set() {
 		let (val, _) = GossipValidator::<Block>::new(config(), voter_set_state(), None);
 
-		let a1 = vec![AuthorityId::default()];
+		let a1 = vec![AuthorityId::from_slice(&[0; 32])];
 		val.note_set(SetId(1), a1.clone(), |_, _| {});
 
 		assert_eq!(val.inner().read().authorities, a1);
 
-		let a2 = vec![AuthorityId::default(), AuthorityId::default()];
+		let a2 = vec![AuthorityId::from_slice(&[1; 32]), AuthorityId::from_slice(&[2; 32])];
 		val.note_set(SetId(1), a2.clone(), |_, _| {});
 
 		assert_eq!(val.inner().read().authorities, a2);

@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -50,6 +50,11 @@ impl<'a> StorageValueRef<'a> {
 		})
 	}
 
+	/// Remove the associated value from the storage.
+	pub fn clear(&mut self) {
+		sp_io::offchain::local_storage_clear(self.kind, self.key)
+	}
+
 	/// Retrieve & decode the value from storage.
 	///
 	/// Note that if you want to do some checks based on the value
@@ -67,7 +72,8 @@ impl<'a> StorageValueRef<'a> {
 	/// Function `f` should return a new value that we should attempt to write to storage.
 	/// This function returns:
 	/// 1. `Ok(Ok(T))` in case the value has been successfully set.
-	/// 2. `Ok(Err(T))` in case the value was returned, but it couldn't have been set.
+	/// 2. `Ok(Err(T))` in case the value was calculated by the passed closure `f`,
+	///    but it could not be stored.
 	/// 3. `Err(_)` in case `f` returns an error.
 	pub fn mutate<T, E, F>(&self, f: F) -> Result<Result<T, T>, E> where
 		T: codec::Codec,
@@ -99,7 +105,6 @@ mod tests {
 	use sp_io::TestExternalities;
 	use sp_core::offchain::{
 		OffchainExt,
-		OffchainStorage,
 		testing,
 	};
 
@@ -119,7 +124,7 @@ mod tests {
 			assert_eq!(val.get::<u32>(), Some(Some(15_u32)));
 			assert_eq!(val.get::<Vec<u8>>(), Some(None));
 			assert_eq!(
-				state.read().persistent_storage.get(b"", b"testval"),
+				state.read().persistent_storage.get(b"testval"),
 				Some(vec![15_u8, 0, 0, 0])
 			);
 		})
@@ -142,7 +147,7 @@ mod tests {
 			assert_eq!(result, Ok(Ok(16_u32)));
 			assert_eq!(val.get::<u32>(), Some(Some(16_u32)));
 			assert_eq!(
-				state.read().persistent_storage.get(b"", b"testval"),
+				state.read().persistent_storage.get(b"testval"),
 				Some(vec![16_u8, 0, 0, 0])
 			);
 

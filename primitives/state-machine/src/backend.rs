@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2017-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,19 +19,23 @@
 
 use hash_db::Hasher;
 use codec::{Decode, Encode};
-use sp_core::{traits::RuntimeCode, storage::{ChildInfo, well_known_keys}};
-
+use sp_core::{
+	storage::{ChildInfo, well_known_keys, TrackedStorageKey}
+};
 use crate::{
 	trie_backend::TrieBackend,
 	trie_backend_essence::TrieBackendStorage,
-	UsageInfo, StorageKey, StorageValue, StorageCollection,
+	UsageInfo, StorageKey, StorageValue, StorageCollection, ChildStorageCollection,
 };
+use sp_std::vec::Vec;
+#[cfg(feature = "std")]
+use sp_core::traits::RuntimeCode;
 
 /// A state backend is used to read state data and can have changes committed
 /// to it.
 ///
 /// The clone operation (if implemented) should be cheap.
-pub trait Backend<H: Hasher>: std::fmt::Debug {
+pub trait Backend<H: Hasher>: sp_std::fmt::Debug {
 	/// An error type when fetching data is not possible.
 	type Error: super::Error;
 
@@ -90,7 +94,8 @@ pub trait Backend<H: Hasher>: std::fmt::Debug {
 	) -> Result<Option<StorageKey>, Self::Error>;
 
 	/// Retrieve all entries keys of child storage and call `f` for each of those keys.
-	fn for_keys_in_child_storage<F: FnMut(&[u8])>(
+	/// Aborts as soon as `f` returns false.
+	fn apply_to_child_keys_while<F: FnMut(&[u8]) -> bool>(
 		&self,
 		child_info: &ChildInfo,
 		f: F,
@@ -119,22 +124,19 @@ pub trait Backend<H: Hasher>: std::fmt::Debug {
 	/// Calculate the storage root, with given delta over what is already stored in
 	/// the backend, and produce a "transaction" that can be used to commit.
 	/// Does not include child storage updates.
-	fn storage_root<I>(&self, delta: I) -> (H::Out, Self::Transaction)
-	where
-		I: IntoIterator<Item=(StorageKey, Option<StorageValue>)>,
-		H::Out: Ord;
+	fn storage_root<'a>(
+		&self,
+		delta: impl Iterator<Item=(&'a [u8], Option<&'a [u8]>)>,
+	) -> (H::Out, Self::Transaction) where H::Out: Ord;
 
 	/// Calculate the child storage root, with given delta over what is already stored in
 	/// the backend, and produce a "transaction" that can be used to commit. The second argument
 	/// is true if child storage root equals default storage root.
-	fn child_storage_root<I>(
+	fn child_storage_root<'a>(
 		&self,
 		child_info: &ChildInfo,
-		delta: I,
-	) -> (H::Out, bool, Self::Transaction)
-	where
-		I: IntoIterator<Item=(StorageKey, Option<StorageValue>)>,
-		H::Out: Ord;
+		delta: impl Iterator<Item=(&'a [u8], Option<&'a [u8]>)>,
+	) -> (H::Out, bool, Self::Transaction) where H::Out: Ord;
 
 	/// Get all key/value pairs into a Vec.
 	fn pairs(&self) -> Vec<(StorageKey, StorageValue)>;
@@ -165,17 +167,14 @@ pub trait Backend<H: Hasher>: std::fmt::Debug {
 	/// Calculate the storage root, with given delta over what is already stored
 	/// in the backend, and produce a "transaction" that can be used to commit.
 	/// Does include child storage updates.
-	fn full_storage_root<I1, I2i, I2>(
+	fn full_storage_root<'a>(
 		&self,
-		delta: I1,
-		child_deltas: I2)
-	-> (H::Out, Self::Transaction)
-	where
-		I1: IntoIterator<Item=(StorageKey, Option<StorageValue>)>,
-		I2i: IntoIterator<Item=(StorageKey, Option<StorageValue>)>,
-		I2: IntoIterator<Item=(ChildInfo, I2i)>,
-		H::Out: Ord + Encode,
-	{
+		delta: impl Iterator<Item=(&'a [u8], Option<&'a [u8]>)>,
+		child_deltas: impl Iterator<Item = (
+			&'a ChildInfo,
+			impl Iterator<Item=(&'a [u8], Option<&'a [u8]>)>,
+		)>,
+	) -> (H::Out, Self::Transaction) where H::Out: Ord + Encode {
 		let mut txs: Self::Transaction = Default::default();
 		let mut child_roots: Vec<_> = Default::default();
 		// child first
@@ -190,8 +189,13 @@ pub trait Backend<H: Hasher>: std::fmt::Debug {
 				child_roots.push((prefixed_storage_key.into_inner(), Some(child_root.encode())));
 			}
 		}
-		let (root, parent_txs) = self.storage_root(
-			delta.into_iter().chain(child_roots.into_iter())
+		let (root, parent_txs) = self.storage_root(delta
+			.map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])))
+			.chain(
+				child_roots
+					.iter()
+					.map(|(k, v)| (&k[..], v.as_ref().map(|v| &v[..])))
+			)
 		);
 		txs.consolidate(parent_txs);
 		(root, txs)
@@ -214,9 +218,33 @@ pub trait Backend<H: Hasher>: std::fmt::Debug {
 	}
 
 	/// Commit given transaction to storage.
-	fn commit(&self, _storage_root: H::Out, _transaction: Self::Transaction) -> Result<(), Self::Error> {
+	fn commit(
+		&self,
+		_: H::Out,
+		_: Self::Transaction,
+		_: StorageCollection,
+		_: ChildStorageCollection,
+	) -> Result<(), Self::Error> {
 		unimplemented!()
 	}
+
+	/// Get the read/write count of the db
+	fn read_write_count(&self) -> (u32, u32, u32, u32) {
+		unimplemented!()
+	}
+
+	/// Get the read/write count of the db
+	fn reset_read_write_count(&self) {
+		unimplemented!()
+	}
+
+	/// Get the whitelist for tracking db reads/writes
+	fn get_whitelist(&self) -> Vec<TrackedStorageKey> {
+		Default::default()
+	}
+
+	/// Update the whitelist for tracking db reads/writes
+	fn set_whitelist(&self, _: Vec<TrackedStorageKey>) {}
 }
 
 impl<'a, T: Backend<H>, H: Hasher> Backend<H> for &'a T {
@@ -236,12 +264,12 @@ impl<'a, T: Backend<H>, H: Hasher> Backend<H> for &'a T {
 		(*self).child_storage(child_info, key)
 	}
 
-	fn for_keys_in_child_storage<F: FnMut(&[u8])>(
+	fn apply_to_child_keys_while<F: FnMut(&[u8]) -> bool>(
 		&self,
 		child_info: &ChildInfo,
 		f: F,
 	) {
-		(*self).for_keys_in_child_storage(child_info, f)
+		(*self).apply_to_child_keys_while(child_info, f)
 	}
 
 	fn next_storage_key(&self, key: &[u8]) -> Result<Option<StorageKey>, Self::Error> {
@@ -269,23 +297,18 @@ impl<'a, T: Backend<H>, H: Hasher> Backend<H> for &'a T {
 		(*self).for_child_keys_with_prefix(child_info, prefix, f)
 	}
 
-	fn storage_root<I>(&self, delta: I) -> (H::Out, Self::Transaction)
-	where
-		I: IntoIterator<Item=(StorageKey, Option<StorageValue>)>,
-		H::Out: Ord,
-	{
+	fn storage_root<'b>(
+		&self,
+		delta: impl Iterator<Item=(&'b [u8], Option<&'b [u8]>)>,
+	) -> (H::Out, Self::Transaction) where H::Out: Ord {
 		(*self).storage_root(delta)
 	}
 
-	fn child_storage_root<I>(
+	fn child_storage_root<'b>(
 		&self,
 		child_info: &ChildInfo,
-		delta: I,
-	) -> (H::Out, bool, Self::Transaction)
-	where
-		I: IntoIterator<Item=(StorageKey, Option<StorageValue>)>,
-		H::Out: Ord,
-	{
+		delta: impl Iterator<Item=(&'b [u8], Option<&'b [u8]>)>,
+	) -> (H::Out, bool, Self::Transaction) where H::Out: Ord {
 		(*self).child_storage_root(child_info, delta)
 	}
 
@@ -355,11 +378,13 @@ pub(crate) fn insert_into_memory_db<H, I>(mdb: &mut sp_trie::MemoryDB<H>, input:
 }
 
 /// Wrapper to create a [`RuntimeCode`] from a type that implements [`Backend`].
+#[cfg(feature = "std")]
 pub struct BackendRuntimeCode<'a, B, H> {
 	backend: &'a B,
 	_marker: std::marker::PhantomData<H>,
 }
 
+#[cfg(feature = "std")]
 impl<'a, B: Backend<H>, H: Hasher> sp_core::traits::FetchRuntimeCode for
 	BackendRuntimeCode<'a, B, H>
 {
@@ -368,6 +393,7 @@ impl<'a, B: Backend<H>, H: Hasher> sp_core::traits::FetchRuntimeCode for
 	}
 }
 
+#[cfg(feature = "std")]
 impl<'a, B: Backend<H>, H: Hasher> BackendRuntimeCode<'a, B, H> where H::Out: Encode {
 	/// Create a new instance.
 	pub fn new(backend: &'a B) -> Self {

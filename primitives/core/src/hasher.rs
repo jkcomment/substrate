@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -33,6 +33,26 @@ pub mod blake2 {
 
 		fn hash(x: &[u8]) -> Self::Out {
 			crate::hashing::blake2_256(x).into()
+		}
+	}
+}
+
+pub mod keccak {
+	use hash_db::Hasher;
+	use hash256_std_hasher::Hash256StdHasher;
+	use crate::hash::H256;
+
+	/// Concrete implementation of Hasher using Keccak 256-bit hashes
+	#[derive(Debug)]
+	pub struct KeccakHasher;
+
+	impl Hasher for KeccakHasher {
+		type Out = H256;
+		type StdHasher = Hash256StdHasher;
+		const LENGTH: usize = 32;
+
+		fn hash(x: &[u8]) -> Self::Out {
+			crate::hashing::keccak_256(x).into()
 		}
 	}
 }

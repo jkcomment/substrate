@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -23,7 +23,7 @@ use sc_cli::{ImportParams, SharedParams};
 use structopt::StructOpt;
 
 /// The `inspect` command used to print decoded chain data.
-#[derive(Debug, StructOpt, Clone)]
+#[derive(Debug, StructOpt)]
 pub struct InspectCmd {
 	#[allow(missing_docs)]
 	#[structopt(flatten)]
@@ -39,7 +39,7 @@ pub struct InspectCmd {
 }
 
 /// A possible inspect sub-commands.
-#[derive(Debug, StructOpt, Clone)]
+#[derive(Debug, StructOpt)]
 pub enum InspectSubCmd {
 	/// Decode block with native version of runtime and print out the details.
 	Block {

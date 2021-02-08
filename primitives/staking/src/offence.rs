@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -117,17 +117,28 @@ impl sp_runtime::traits::Printable for OffenceError {
 pub trait ReportOffence<Reporter, Offender, O: Offence<Offender>> {
 	/// Report an `offence` and reward given `reporters`.
 	fn report_offence(reporters: Vec<Reporter>, offence: O) -> Result<(), OffenceError>;
+
+	/// Returns true iff all of the given offenders have been previously reported
+	/// at the given time slot. This function is useful to prevent the sending of
+	/// duplicate offence reports.
+	fn is_known_offence(offenders: &[Offender], time_slot: &O::TimeSlot) -> bool;
 }
 
 impl<Reporter, Offender, O: Offence<Offender>> ReportOffence<Reporter, Offender, O> for () {
-	fn report_offence(_reporters: Vec<Reporter>, _offence: O) -> Result<(), OffenceError> { Ok(()) }
+	fn report_offence(_reporters: Vec<Reporter>, _offence: O) -> Result<(), OffenceError> {
+		Ok(())
+	}
+
+	fn is_known_offence(_offenders: &[Offender], _time_slot: &O::TimeSlot) -> bool {
+		true
+	}
 }
 
 /// A trait to take action on an offence.
 ///
 /// Used to decouple the module that handles offences and
 /// the one that should punish for those offences.
-pub trait OnOffenceHandler<Reporter, Offender> {
+pub trait OnOffenceHandler<Reporter, Offender, Res> {
 	/// A handler for an offence of a particular kind.
 	///
 	/// Note that this contains a list of all previous offenders
@@ -148,7 +159,7 @@ pub trait OnOffenceHandler<Reporter, Offender> {
 		offenders: &[OffenceDetails<Reporter, Offender>],
 		slash_fraction: &[Perbill],
 		session: SessionIndex,
-	) -> Result<(), ()>;
+	) -> Result<Res, ()>;
 
 	/// Can an offence be reported now or not. This is an method to short-circuit a call into
 	/// `on_offence`. Ideally, a correct implementation should return `false` if `on_offence` will
@@ -157,12 +168,14 @@ pub trait OnOffenceHandler<Reporter, Offender> {
 	fn can_report() -> bool;
 }
 
-impl<Reporter, Offender> OnOffenceHandler<Reporter, Offender> for () {
+impl<Reporter, Offender, Res: Default> OnOffenceHandler<Reporter, Offender, Res> for () {
 	fn on_offence(
 		_offenders: &[OffenceDetails<Reporter, Offender>],
 		_slash_fraction: &[Perbill],
 		_session: SessionIndex,
-	) -> Result<(), ()> { Ok(()) }
+	) -> Result<Res, ()> {
+		Ok(Default::default())
+	}
 
 	fn can_report() -> bool { true }
 }

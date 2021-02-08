@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,74 +18,77 @@
 //! Test utilities
 
 use super::*;
+use crate as pallet_scored_pool;
 
 use std::cell::RefCell;
-use frame_support::{impl_outer_origin, parameter_types, weights::Weight, ord_parameter_types};
+use frame_support::{parameter_types, ord_parameter_types};
 use sp_core::H256;
-// The testing primitives are very useful for avoiding having to work with signatures
-// or public keys. `u64` is used as the `AccountId` and no `Signature`s are required.
 use sp_runtime::{
-	Perbill, traits::{BlakeTwo256, IdentityLookup}, testing::Header,
+	traits::{BlakeTwo256, IdentityLookup}, testing::Header,
 };
 use frame_system::EnsureSignedBy;
 
-impl_outer_origin! {
-	pub enum Origin for Test  where system = frame_system {}
-}
+type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Test>;
+type Block = frame_system::mocking::MockBlock<Test>;
 
-// For testing the pallet, we construct most of a mock runtime. This means
-// first constructing a configuration type (`Test`) which `impl`s each of the
-// configuration traits of pallets we want to use.
-#[derive(Clone, Eq, PartialEq)]
-pub struct Test;
+frame_support::construct_runtime!(
+	pub enum Test where
+		Block = Block,
+		NodeBlock = Block,
+		UncheckedExtrinsic = UncheckedExtrinsic,
+	{
+		System: frame_system::{Module, Call, Config, Storage, Event<T>},
+		Balances: pallet_balances::{Module, Call, Storage, Config<T>, Event<T>},
+		ScoredPool: pallet_scored_pool::{Module, Call, Storage, Config<T>, Event<T>},
+	}
+);
+
 parameter_types! {
 	pub const CandidateDeposit: u64 = 25;
 	pub const Period: u64 = 4;
-
 	pub const BlockHashCount: u64 = 250;
-	pub const MaximumBlockWeight: Weight = 1024;
-	pub const MaximumBlockLength: u32 = 2 * 1024;
-	pub const AvailableBlockRatio: Perbill = Perbill::one();
-
 	pub const ExistentialDeposit: u64 = 1;
+	pub BlockWeights: frame_system::limits::BlockWeights =
+		frame_system::limits::BlockWeights::simple_max(1024);
 }
 ord_parameter_types! {
 	pub const KickOrigin: u64 = 2;
 	pub const ScoreOrigin: u64 = 3;
 }
 
-impl frame_system::Trait for Test {
+impl frame_system::Config for Test {
+	type BaseCallFilter = ();
+	type BlockWeights = ();
+	type BlockLength = ();
+	type DbWeight = ();
 	type Origin = Origin;
 	type Index = u64;
 	type BlockNumber = u64;
 	type Hash = H256;
-	type Call = ();
+	type Call = Call;
 	type Hashing = BlakeTwo256;
 	type AccountId = u64;
 	type Lookup = IdentityLookup<Self::AccountId>;
 	type Header = Header;
-	type Event = ();
+	type Event = Event;
 	type BlockHashCount = BlockHashCount;
-	type MaximumBlockWeight = MaximumBlockWeight;
-	type DbWeight = ();
-	type BlockExecutionWeight = ();
-	type ExtrinsicBaseWeight = ();
-	type MaximumExtrinsicWeight = MaximumBlockWeight;
-	type MaximumBlockLength = MaximumBlockLength;
-	type AvailableBlockRatio = AvailableBlockRatio;
 	type Version = ();
-	type ModuleToIndex = ();
+	type PalletInfo = PalletInfo;
 	type AccountData = pallet_balances::AccountData<u64>;
 	type OnNewAccount = ();
 	type OnKilledAccount = ();
+	type SystemWeightInfo = ();
+	type SS58Prefix = ();
 }
 
-impl pallet_balances::Trait for Test {
+impl pallet_balances::Config for Test {
+	type MaxLocks = ();
 	type Balance = u64;
-	type Event = ();
+	type Event = Event;
 	type DustRemoval = ();
 	type ExistentialDeposit = ExistentialDeposit;
 	type AccountStore = System;
+	type WeightInfo = ();
 }
 
 thread_local! {
@@ -115,8 +118,8 @@ impl InitializeMembers<u64> for TestChangeMembers {
 	}
 }
 
-impl Trait for Test {
-	type Event = ();
+impl Config for Test {
+	type Event = Event;
 	type KickOrigin = EnsureSignedBy<KickOrigin, u64>;
 	type MembershipInitialized = TestChangeMembers;
 	type MembershipChanged = TestChangeMembers;
@@ -127,14 +130,8 @@ impl Trait for Test {
 	type ScoreOrigin = EnsureSignedBy<ScoreOrigin, u64>;
 }
 
-type System = frame_system::Module<Test>;
-type Balances = pallet_balances::Module<Test>;
-
-// This function basically just builds a genesis storage key/value store according to
-// our desired mockup.
 pub fn new_test_ext() -> sp_io::TestExternalities {
 	let mut t = frame_system::GenesisConfig::default().build_storage::<Test>().unwrap();
-	// We use default for brevity, but you can configure as desired if needed.
 	pallet_balances::GenesisConfig::<Test> {
 		balances: vec![
 			(5, 500_000),
@@ -146,7 +143,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 			(99, 1),
 		],
 	}.assimilate_storage(&mut t).unwrap();
-	GenesisConfig::<Test>{
+	pallet_scored_pool::GenesisConfig::<Test>{
 		pool: vec![
 			(5, None),
 			(10, Some(1)),

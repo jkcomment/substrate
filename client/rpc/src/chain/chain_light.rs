@@ -1,26 +1,28 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! Blockchain API backend for light nodes.
 
 use std::sync::Arc;
 use futures::{future::ready, FutureExt, TryFutureExt};
 use rpc::futures::future::{result, Future, Either};
+use jsonrpc_pubsub::manager::SubscriptionManager;
 
-use sc_rpc_api::Subscriptions;
 use sc_client_api::light::{Fetcher, RemoteBodyRequest, RemoteBlockchain};
 use sp_runtime::{
 	generic::{BlockId, SignedBlock},
@@ -37,7 +39,7 @@ pub struct LightChain<Block: BlockT, Client, F> {
 	/// Substrate client.
 	client: Arc<Client>,
 	/// Current subscriptions.
-	subscriptions: Subscriptions,
+	subscriptions: SubscriptionManager,
 	/// Remote blockchain reference
 	remote_blockchain: Arc<dyn RemoteBlockchain<Block>>,
 	/// Remote fetcher reference.
@@ -48,7 +50,7 @@ impl<Block: BlockT, Client, F: Fetcher<Block>> LightChain<Block, Client, F> {
 	/// Create new Chain API RPC handler.
 	pub fn new(
 		client: Arc<Client>,
-		subscriptions: Subscriptions,
+		subscriptions: SubscriptionManager,
 		remote_blockchain: Arc<dyn RemoteBlockchain<Block>>,
 		fetcher: Arc<F>,
 	) -> Self {
@@ -70,7 +72,7 @@ impl<Block, Client, F> ChainBackend<Client, Block> for LightChain<Block, Client,
 		&self.client
 	}
 
-	fn subscriptions(&self) -> &Subscriptions {
+	fn subscriptions(&self) -> &SubscriptionManager {
 		&self.subscriptions
 	}
 

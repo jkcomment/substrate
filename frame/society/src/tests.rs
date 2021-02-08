@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2020-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -813,7 +813,7 @@ fn max_limits_work() {
 		// No candidates because full
 		assert_eq!(Society::candidates().len(), 0);
 		// Increase member limit
-		assert_ok!(Society::set_max_members(Origin::ROOT, 200));
+		assert_ok!(Society::set_max_members(Origin::root(), 200));
 		// Rotate period
 		run_to_block(16);
 		// Candidates are back!

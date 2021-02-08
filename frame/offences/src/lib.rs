@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,41 +28,59 @@ mod tests;
 use sp_std::vec::Vec;
 use frame_support::{
 	decl_module, decl_event, decl_storage, Parameter, debug,
+	traits::Get,
 	weights::Weight,
 };
-use sp_runtime::{traits::Hash, Perbill};
+use sp_runtime::{traits::{Hash, Zero}, Perbill};
 use sp_staking::{
 	SessionIndex,
 	offence::{Offence, ReportOffence, Kind, OnOffenceHandler, OffenceDetails, OffenceError},
 };
 use codec::{Encode, Decode};
-use frame_system as system;
 
 /// A binary blob which represents a SCALE codec-encoded `O::TimeSlot`.
 type OpaqueTimeSlot = Vec<u8>;
 
 /// A type alias for a report identifier.
-type ReportIdOf<T> = <T as frame_system::Trait>::Hash;
+type ReportIdOf<T> = <T as frame_system::Config>::Hash;
 
 /// Type of data stored as a deferred offence
 pub type DeferredOffenceOf<T> = (
-	Vec<OffenceDetails<<T as frame_system::Trait>::AccountId, <T as Trait>::IdentificationTuple>>,
+	Vec<OffenceDetails<<T as frame_system::Config>::AccountId, <T as Config>::IdentificationTuple>>,
 	Vec<Perbill>,
 	SessionIndex,
 );
 
+pub trait WeightInfo {
+	fn report_offence_im_online(r: u32, o: u32, n: u32, ) -> Weight;
+	fn report_offence_grandpa(r: u32, n: u32, ) -> Weight;
+	fn report_offence_babe(r: u32, n: u32, ) -> Weight;
+	fn on_initialize(d: u32, ) -> Weight;
+}
+
+impl WeightInfo for () {
+	fn report_offence_im_online(_r: u32, _o: u32, _n: u32, ) -> Weight { 1_000_000_000 }
+	fn report_offence_grandpa(_r: u32, _n: u32, ) -> Weight { 1_000_000_000 }
+	fn report_offence_babe(_r: u32, _n: u32, ) -> Weight { 1_000_000_000 }
+	fn on_initialize(_d: u32, ) -> Weight { 1_000_000_000 }
+}
+
 /// Offences trait
-pub trait Trait: frame_system::Trait {
+pub trait Config: frame_system::Config {
 	/// The overarching event type.
-	type Event: From<Event> + Into<<Self as frame_system::Trait>::Event>;
+	type Event: From<Event> + Into<<Self as frame_system::Config>::Event>;
 	/// Full identification of the validator.
 	type IdentificationTuple: Parameter + Ord;
 	/// A handler called for every offence report.
-	type OnOffenceHandler: OnOffenceHandler<Self::AccountId, Self::IdentificationTuple>;
+	type OnOffenceHandler: OnOffenceHandler<Self::AccountId, Self::IdentificationTuple, Weight>;
+	/// The a soft limit on maximum weight that may be consumed while dispatching deferred offences in
+	/// `on_initialize`.
+	/// Note it's going to be exceeded before we stop adding to it, so it has to be set conservatively.
+	type WeightSoftLimit: Get<Weight>;
 }
 
 decl_storage! {
-	trait Store for Module<T: Trait> as Offences {
+	trait Store for Module<T: Config> as Offences {
 		/// The primary structure that holds all offence records keyed by report identifiers.
 		Reports get(fn reports):
 			map hasher(twox_64_concat) ReportIdOf<T>
@@ -91,39 +109,56 @@ decl_event!(
 	pub enum Event {
 		/// There is an offence reported of the given `kind` happened at the `session_index` and
 		/// (kind-specific) time slot. This event is not deposited for duplicate slashes. last
-		/// element indicates of the offence was applied (true) or queued (false).
+		/// element indicates of the offence was applied (true) or queued (false)
+		/// \[kind, timeslot, applied\].
 		Offence(Kind, OpaqueTimeSlot, bool),
 	}
 );
 
 decl_module! {
-	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
+	pub struct Module<T: Config> for enum Call where origin: T::Origin {
 		fn deposit_event() = default;
 
 		fn on_initialize(now: T::BlockNumber) -> Weight {
 			// only decode storage if we can actually submit anything again.
-			if T::OnOffenceHandler::can_report() {
-				<DeferredOffences<T>>::mutate(|deferred| {
-					// keep those that fail to be reported again. An error log is emitted here; this
-					// should not happen if staking's `can_report` is implemented properly.
-					deferred.retain(|(o, p, s)| {
-						T::OnOffenceHandler::on_offence(&o, &p, *s).map_err(|_| {
-							debug::native::error!(
-								target: "pallet-offences",
-								"re-submitting a deferred slash returned Err at {}. This should not happen with pallet-staking",
-								now,
-							);
-						}).is_err()
-					})
-				})
+			if !T::OnOffenceHandler::can_report() {
+				return 0;
 			}
 
-			0
+			let limit = T::WeightSoftLimit::get();
+			let mut consumed = Weight::zero();
+
+			<DeferredOffences<T>>::mutate(|deferred| {
+				deferred.retain(|(offences, perbill, session)| {
+					if consumed >= limit {
+						true
+					} else {
+						// keep those that fail to be reported again. An error log is emitted here; this
+						// should not happen if staking's `can_report` is implemented properly.
+						match T::OnOffenceHandler::on_offence(&offences, &perbill, *session) {
+							Ok(weight) => {
+								consumed += weight;
+								false
+							},
+							Err(_) => {
+								debug::native::error!(
+									target: "pallet-offences",
+									"re-submitting a deferred slash returned Err at {}. This should not happen with pallet-staking",
+									now,
+								);
+								true
+							},
+						}
+					}
+				})
+			});
+
+			consumed
 		}
 	}
 }
 
-impl<T: Trait, O: Offence<T::IdentificationTuple>>
+impl<T: Config, O: Offence<T::IdentificationTuple>>
 	ReportOffence<T::AccountId, T::IdentificationTuple, O> for Module<T>
 where
 	T::IdentificationTuple: Clone,
@@ -133,7 +168,7 @@ where
 		let time_slot = offence.time_slot();
 		let validator_set_count = offence.validator_set_count();
 
-		// Go through all offenders in the offence report and find all offenders that was spotted
+		// Go through all offenders in the offence report and find all offenders that were spotted
 		// in unique reports.
 		let TriageOutcome { concurrent_offenders } = match Self::triage_offence_report::<O>(
 			reporters,
@@ -164,9 +199,18 @@ where
 
 		Ok(())
 	}
+
+	fn is_known_offence(offenders: &[T::IdentificationTuple], time_slot: &O::TimeSlot) -> bool {
+		let any_unknown = offenders.iter().any(|offender| {
+			let report_id = Self::report_id::<O>(time_slot, offender);
+			!<Reports<T>>::contains_key(&report_id)
+		});
+
+		!any_unknown
+	}
 }
 
-impl<T: Trait> Module<T> {
+impl<T: Config> Module<T> {
 	/// Tries (without checking) to report an offence. Stores them in [`DeferredOffences`] in case
 	/// it fails. Returns false in case it has to store the offence.
 	fn report_or_store_offence(
@@ -249,7 +293,7 @@ impl<T: Trait> Module<T> {
 	}
 }
 
-struct TriageOutcome<T: Trait> {
+struct TriageOutcome<T: Config> {
 	/// Other reports for the same report kinds.
 	concurrent_offenders: Vec<OffenceDetails<T::AccountId, T::IdentificationTuple>>,
 }
@@ -260,13 +304,13 @@ struct TriageOutcome<T: Trait> {
 /// This struct is responsible for aggregating storage writes and the underlying storage should not
 /// accessed directly meanwhile.
 #[must_use = "The changes are not saved without called `save`"]
-struct ReportIndexStorage<T: Trait, O: Offence<T::IdentificationTuple>> {
+struct ReportIndexStorage<T: Config, O: Offence<T::IdentificationTuple>> {
 	opaque_time_slot: OpaqueTimeSlot,
 	concurrent_reports: Vec<ReportIdOf<T>>,
 	same_kind_reports: Vec<(O::TimeSlot, ReportIdOf<T>)>,
 }
 
-impl<T: Trait, O: Offence<T::IdentificationTuple>> ReportIndexStorage<T, O> {
+impl<T: Config, O: Offence<T::IdentificationTuple>> ReportIndexStorage<T, O> {
 	/// Preload indexes from the storage for the specific `time_slot` and the kind of the offence.
 	fn load(time_slot: &O::TimeSlot) -> Self {
 		let opaque_time_slot = time_slot.encode();

@@ -1,34 +1,39 @@
-// Copyright 2019-2020 Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
-// Substrate is free software: you can redistribute it and/or modify
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
+// SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
+
+// This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-// Substrate is distributed in the hope that it will be useful,
+// This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 
 // You should have received a copy of the GNU General Public License
-// along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 //! BABE authority selection and slot claiming.
 
+use sp_application_crypto::AppKey;
 use sp_consensus_babe::{
-	make_transcript, AuthorityId, BabeAuthorityWeight, BABE_VRF_PREFIX,
-	SlotNumber, AuthorityPair,
+	BABE_VRF_PREFIX, AuthorityId, BabeAuthorityWeight, make_transcript, make_transcript_data,
+	Slot,
 };
 use sp_consensus_babe::digests::{
 	PreDigest, PrimaryPreDigest, SecondaryPlainPreDigest, SecondaryVRFPreDigest,
 };
 use sp_consensus_vrf::schnorrkel::{VRFOutput, VRFProof};
-use sp_core::{U256, blake2_256};
+use sp_core::{U256, blake2_256, crypto::Public};
+use sp_keystore::{SyncCryptoStorePtr, SyncCryptoStore};
 use codec::Encode;
-use schnorrkel::vrf::VRFInOut;
-use sp_core::Pair;
-use sc_keystore::KeyStorePtr;
+use schnorrkel::{
+	keys::PublicKey,
+	vrf::VRFInOut,
+};
 use super::Epoch;
 
 /// Calculates the primary selection threshold for a given authority, taking
@@ -98,7 +103,7 @@ pub(super) fn check_primary_threshold(inout: &VRFInOut, threshold: u128) -> bool
 /// authorities. This should always assign the slot to some authority unless the
 /// authorities list is empty.
 pub(super) fn secondary_slot_author(
-	slot_number: u64,
+	slot: Slot,
 	authorities: &[(AuthorityId, BabeAuthorityWeight)],
 	randomness: [u8; 32],
 ) -> Option<&AuthorityId> {
@@ -106,7 +111,7 @@ pub(super) fn secondary_slot_author(
 		return None;
 	}
 
-	let rand = U256::from((randomness, slot_number).using_encoded(blake2_256));
+	let rand = U256::from((randomness, slot).using_encoded(blake2_256));
 
 	let authorities_len = U256::from(authorities.len());
 	let idx = rand % authorities_len;
@@ -122,9 +127,10 @@ pub(super) fn secondary_slot_author(
 /// pre-digest to use when authoring the block, or `None` if it is not our turn
 /// to propose.
 fn claim_secondary_slot(
-	slot_number: SlotNumber,
+	slot: Slot,
 	epoch: &Epoch,
-	key_pairs: &[(AuthorityPair, usize)],
+	keys: &[(AuthorityId, usize)],
+	keystore: &SyncCryptoStorePtr,
 	author_secondary_vrf: bool,
 ) -> Option<(PreDigest, AuthorityId)> {
 	let Epoch { authorities, randomness, epoch_index, .. } = epoch;
@@ -134,36 +140,47 @@ fn claim_secondary_slot(
 	}
 
 	let expected_author = super::authorship::secondary_slot_author(
-		slot_number,
+		slot,
 		authorities,
 		*randomness,
 	)?;
 
-	for (pair, authority_index) in key_pairs {
-		if pair.public() == *expected_author {
+	for (authority_id, authority_index) in keys {
+		if authority_id == expected_author {
 			let pre_digest = if author_secondary_vrf {
-				let transcript = super::authorship::make_transcript(
+				let transcript_data = super::authorship::make_transcript_data(
 					randomness,
-					slot_number,
+					slot,
 					*epoch_index,
 				);
-
-				let s = get_keypair(&pair).vrf_sign(transcript);
-
-				PreDigest::SecondaryVRF(SecondaryVRFPreDigest {
-					slot_number,
-					vrf_output: VRFOutput(s.0.to_output()),
-					vrf_proof: VRFProof(s.1),
+				let result = SyncCryptoStore::sr25519_vrf_sign(
+					&**keystore,
+					AuthorityId::ID,
+					authority_id.as_ref(),
+					transcript_data,
+				);
+				if let Ok(signature)  = result {
+					Some(PreDigest::SecondaryVRF(SecondaryVRFPreDigest {
+						slot,
+						vrf_output: VRFOutput(signature.output),
+						vrf_proof: VRFProof(signature.proof),
+						authority_index: *authority_index as u32,
+					}))
+				} else {
+					None
+				}
+			} else if SyncCryptoStore::has_keys(&**keystore, &[(authority_id.to_raw_vec(), AuthorityId::ID)]) {
+				Some(PreDigest::SecondaryPlain(SecondaryPlainPreDigest {
+					slot,
 					authority_index: *authority_index as u32,
-				})
+				}))
 			} else {
-				PreDigest::SecondaryPlain(SecondaryPlainPreDigest {
-					slot_number,
-					authority_index: *authority_index as u32,
-				})
+				None
 			};
 
-			return Some((pre_digest, pair.public()));
+			if let Some(pre_digest) = pre_digest {
+				return Some((pre_digest, authority_id.clone()));
+			}
 		}
 	}
 
@@ -175,38 +192,35 @@ fn claim_secondary_slot(
 /// secondary slots enabled for the given epoch, we will fallback to trying to
 /// claim a secondary slot.
 pub fn claim_slot(
-	slot_number: SlotNumber,
+	slot: Slot,
 	epoch: &Epoch,
-	keystore: &KeyStorePtr,
+	keystore: &SyncCryptoStorePtr,
 ) -> Option<(PreDigest, AuthorityId)> {
-	let key_pairs = {
-		let keystore = keystore.read();
-		epoch.authorities.iter()
-			.enumerate()
-			.flat_map(|(i, a)| {
-				keystore.key_pair::<AuthorityPair>(&a.0).ok().map(|kp| (kp, i))
-			})
-			.collect::<Vec<_>>()
-	};
-	claim_slot_using_key_pairs(slot_number, epoch, &key_pairs)
+	let authorities = epoch.authorities.iter()
+		.enumerate()
+		.map(|(index, a)| (a.0.clone(), index))
+		.collect::<Vec<_>>();
+	claim_slot_using_keys(slot, epoch, keystore, &authorities)
 }
 
 /// Like `claim_slot`, but allows passing an explicit set of key pairs. Useful if we intend
 /// to make repeated calls for different slots using the same key pairs.
-pub fn claim_slot_using_key_pairs(
-	slot_number: SlotNumber,
+pub fn claim_slot_using_keys(
+	slot: Slot,
 	epoch: &Epoch,
-	key_pairs: &[(AuthorityPair, usize)],
+	keystore: &SyncCryptoStorePtr,
+	keys: &[(AuthorityId, usize)],
 ) -> Option<(PreDigest, AuthorityId)> {
-	claim_primary_slot(slot_number, epoch, epoch.config.c, &key_pairs)
+	claim_primary_slot(slot, epoch, epoch.config.c, keystore, &keys)
 		.or_else(|| {
 			if epoch.config.allowed_slots.is_secondary_plain_slots_allowed() ||
 				epoch.config.allowed_slots.is_secondary_vrf_slots_allowed()
 			{
 				claim_secondary_slot(
-					slot_number,
+					slot,
 					&epoch,
-					&key_pairs,
+					keys,
+					&keystore,
 					epoch.config.allowed_slots.is_secondary_vrf_slots_allowed(),
 				)
 			} else {
@@ -215,48 +229,101 @@ pub fn claim_slot_using_key_pairs(
 		})
 }
 
-fn get_keypair(q: &AuthorityPair) -> &schnorrkel::Keypair {
-	use sp_core::crypto::IsWrappedBy;
-	sp_core::sr25519::Pair::from_ref(q).as_ref()
-}
-
 /// Claim a primary slot if it is our turn.  Returns `None` if it is not our turn.
 /// This hashes the slot number, epoch, genesis hash, and chain randomness into
 /// the VRF.  If the VRF produces a value less than `threshold`, it is our turn,
 /// so it returns `Some(_)`. Otherwise, it returns `None`.
 fn claim_primary_slot(
-	slot_number: SlotNumber,
+	slot: Slot,
 	epoch: &Epoch,
 	c: (u64, u64),
-	key_pairs: &[(AuthorityPair, usize)],
+	keystore: &SyncCryptoStorePtr,
+	keys: &[(AuthorityId, usize)],
 ) -> Option<(PreDigest, AuthorityId)> {
 	let Epoch { authorities, randomness, epoch_index, .. } = epoch;
 
-	for (pair, authority_index) in key_pairs {
-		let transcript = super::authorship::make_transcript(randomness, slot_number, *epoch_index);
-
+	for (authority_id, authority_index) in keys {
+		let transcript = super::authorship::make_transcript(
+			randomness,
+			slot,
+			*epoch_index
+		);
+		let transcript_data = super::authorship::make_transcript_data(
+			randomness,
+			slot,
+			*epoch_index
+		);
 		// Compute the threshold we will use.
 		//
 		// We already checked that authorities contains `key.public()`, so it can't
 		// be empty.  Therefore, this division in `calculate_threshold` is safe.
 		let threshold = super::authorship::calculate_primary_threshold(c, authorities, *authority_index);
 
-		let pre_digest = get_keypair(pair)
-			.vrf_sign_after_check(transcript, |inout| super::authorship::check_primary_threshold(inout, threshold))
-			.map(|s| {
-				PreDigest::Primary(PrimaryPreDigest {
-					slot_number,
-					vrf_output: VRFOutput(s.0.to_output()),
-					vrf_proof: VRFProof(s.1),
+		let result = SyncCryptoStore::sr25519_vrf_sign(
+			&**keystore,
+			AuthorityId::ID,
+			authority_id.as_ref(),
+			transcript_data,
+		);
+		if let Ok(signature)  = result {
+			let public = PublicKey::from_bytes(&authority_id.to_raw_vec()).ok()?;
+			let inout = match signature.output.attach_input_hash(&public, transcript) {
+				Ok(inout) => inout,
+				Err(_) => continue,
+			};
+			if super::authorship::check_primary_threshold(&inout, threshold) {
+				let pre_digest = PreDigest::Primary(PrimaryPreDigest {
+					slot,
+					vrf_output: VRFOutput(signature.output),
+					vrf_proof: VRFProof(signature.proof),
 					authority_index: *authority_index as u32,
-				})
-			});
+				});
 
-		// early exit on first successful claim
-		if let Some(pre_digest) = pre_digest {
-			return Some((pre_digest, pair.public()));
+				return Some((pre_digest, authority_id.clone()));
+			}
 		}
 	}
 
 	None
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::sync::Arc;
+	use sp_core::{sr25519::Pair, crypto::Pair as _};
+	use sp_consensus_babe::{AuthorityId, BabeEpochConfiguration, AllowedSlots};
+	use sc_keystore::LocalKeystore;
+
+	#[test]
+	fn claim_secondary_plain_slot_works() {
+		let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+		let valid_public_key = SyncCryptoStore::sr25519_generate_new(
+			&*keystore,
+			AuthorityId::ID,
+			Some(sp_core::crypto::DEV_PHRASE),
+		).unwrap();
+
+		let authorities = vec![
+			(AuthorityId::from(Pair::generate().0.public()), 5),
+			(AuthorityId::from(Pair::generate().0.public()), 7),
+		];
+
+		let mut epoch = Epoch {
+			epoch_index: 10,
+			start_slot: 0.into(),
+			duration: 20,
+			authorities: authorities.clone(),
+			randomness: Default::default(),
+			config: BabeEpochConfiguration {
+				c: (3, 10),
+				allowed_slots: AllowedSlots::PrimaryAndSecondaryPlainSlots,
+			},
+		};
+
+		assert!(claim_slot(10.into(), &epoch, &keystore).is_none());
+
+		epoch.authorities.push((valid_public_key.clone().into(), 10));
+		assert_eq!(claim_slot(10.into(), &epoch, &keystore).unwrap().1, valid_public_key.into());
+	}
 }

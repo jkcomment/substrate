@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2018-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2018-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: GPL-3.0-or-later WITH Classpath-exception-2.0
 
 // This program is free software: you can redistribute it and/or modify
@@ -86,6 +86,23 @@ arg_enum! {
 }
 
 arg_enum! {
+	#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+	pub enum CryptoScheme {
+		Ed25519,
+		Sr25519,
+		Ecdsa,
+	}
+}
+
+arg_enum! {
+	#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+	pub enum OutputType {
+		Json,
+		Text,
+	}
+}
+
+arg_enum! {
 	/// How to execute blocks
 	#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 	pub enum ExecutionStrategy {
@@ -155,8 +172,6 @@ arg_enum! {
 	pub enum Database {
 		// Facebooks RocksDB
 		RocksDb,
-		// Subdb. https://github.com/paritytech/subdb/
-		SubDb,
 		// ParityDb. https://github.com/paritytech/parity-db/
 		ParityDb,
 	}
@@ -178,6 +193,8 @@ arg_enum! {
 pub const DEFAULT_EXECUTION_SYNCING: ExecutionStrategy = ExecutionStrategy::NativeElseWasm;
 /// Default value for the `--execution-import-block` parameter.
 pub const DEFAULT_EXECUTION_IMPORT_BLOCK: ExecutionStrategy = ExecutionStrategy::NativeElseWasm;
+/// Default value for the `--execution-import-block` parameter when the node is a validator.
+pub const DEFAULT_EXECUTION_IMPORT_BLOCK_VALIDATOR: ExecutionStrategy = ExecutionStrategy::Wasm;
 /// Default value for the `--execution-block-construction` parameter.
 pub const DEFAULT_EXECUTION_BLOCK_CONSTRUCTION: ExecutionStrategy = ExecutionStrategy::Wasm;
 /// Default value for the `--execution-offchain-worker` parameter.

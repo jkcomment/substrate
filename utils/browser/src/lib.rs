@@ -1,6 +1,6 @@
 // This file is part of Substrate.
 
-// Copyright (C) 2019-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) 2019-2021 Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,35 +17,49 @@
 
 use futures01::sync::mpsc as mpsc01;
 use log::{debug, info};
-use std::sync::Arc;
 use sc_network::config::TransportConfig;
 use sc_service::{
-	AbstractService, RpcSession, Role, Configuration,
+	RpcSession, Role, Configuration, TaskManager, RpcHandlers,
 	config::{DatabaseConfig, KeystoreConfig, NetworkConfiguration},
-	GenericChainSpec, RuntimeGenesis
+	GenericChainSpec, RuntimeGenesis,
+	KeepBlocks, TransactionStorageMode,
 };
+use sc_telemetry::{TelemetryHandle, TelemetrySpan};
+use sc_tracing::logging::LoggerBuilder;
 use wasm_bindgen::prelude::*;
-use futures::{prelude::*, channel::{oneshot, mpsc}, future::{poll_fn, ok}, compat::*};
-use std::task::Poll;
+use futures::{
+	prelude::*, channel::{oneshot, mpsc}, compat::*, future::{ready, ok, select}
+};
 use std::pin::Pin;
 use sc_chain_spec::Extension;
 use libp2p_wasm_ext::{ExtTransport, ffi};
 
 pub use console_error_panic_hook::set_once as set_console_error_panic_hook;
-pub use console_log::init_with_level as init_console_log;
+
+/// Initialize the logger and return a `TelemetryWorker` and a wasm `ExtTransport`.
+pub fn init_logging_and_telemetry(
+	pattern: &str,
+) -> Result<sc_telemetry::TelemetryWorker, sc_tracing::logging::Error> {
+	let transport = ExtTransport::new(ffi::websocket_transport());
+	let mut logger = LoggerBuilder::new(pattern);
+	logger.with_transport(transport);
+	logger.init()
+}
 
 /// Create a service configuration from a chain spec.
 ///
 /// This configuration contains good defaults for a browser light client.
-pub async fn browser_configuration<G, E>(chain_spec: GenericChainSpec<G, E>)
-	-> Result<Configuration, Box<dyn std::error::Error>>
+pub async fn browser_configuration<G, E>(
+	chain_spec: GenericChainSpec<G, E>,
+	telemetry_handle: Option<TelemetryHandle>,
+) -> Result<Configuration, Box<dyn std::error::Error>>
 where
 	G: RuntimeGenesis + 'static,
-	E: Extension + 'static + Send,
+	E: Extension + 'static + Send + Sync,
 {
 	let name = chain_spec.name().to_string();
-
 	let transport = ExtTransport::new(ffi::websocket_transport());
+
 	let mut network = NetworkConfiguration::new(
 		format!("{} (Browser)", name),
 		"unknown",
@@ -57,15 +71,20 @@ where
 		wasm_external_transport: Some(transport.clone()),
 		allow_private_ipv4: true,
 		enable_mdns: false,
-		use_yamux_flow_control: true,
 	};
+	let telemetry_span = telemetry_handle.as_ref().map(|_| TelemetrySpan::new());
 
 	let config = Configuration {
 		network,
 		telemetry_endpoints: chain_spec.telemetry_endpoints().clone(),
 		chain_spec: Box::new(chain_spec),
-		task_executor: Arc::new(move |fut, _| wasm_bindgen_futures::spawn_local(fut)),
+		task_executor: (|fut, _| {
+			wasm_bindgen_futures::spawn_local(fut);
+			async {}
+		}).into(),
 		telemetry_external_transport: Some(transport),
+		telemetry_handle,
+		telemetry_span,
 		role: Role::Light,
 		database: {
 			info!("Opening Indexed DB database '{}'...", name);
@@ -73,19 +92,23 @@ where
 
 			DatabaseConfig::Custom(sp_database::as_database(db))
 		},
+		keystore_remote: Default::default(),
 		keystore: KeystoreConfig::InMemory,
 		default_heap_pages: Default::default(),
 		dev_key_seed: Default::default(),
 		disable_grandpa: Default::default(),
 		execution_strategies: Default::default(),
 		force_authoring: Default::default(),
-		impl_name: "parity-substrate",
-		impl_version: "0.0.0",
+		impl_name: String::from("parity-substrate"),
+		impl_version: String::from("0.0.0"),
 		offchain_worker: Default::default(),
 		prometheus_config: Default::default(),
-		pruning: Default::default(),
+		state_pruning: Default::default(),
+		keep_blocks: KeepBlocks::All,
+		transaction_storage: TransactionStorageMode::BlockBody,
 		rpc_cors: Default::default(),
 		rpc_http: Default::default(),
+		rpc_ipc: Default::default(),
 		rpc_ws: Default::default(),
 		rpc_ws_max_connections: Default::default(),
 		rpc_methods: Default::default(),
@@ -95,8 +118,14 @@ where
 		tracing_targets: Default::default(),
 		transaction_pool: Default::default(),
 		wasm_method: Default::default(),
+		wasm_runtime_overrides: Default::default(),
 		max_runtime_instances: 8,
 		announce_block: true,
+		base_path: None,
+		informant_output_format: sc_informant::OutputFormat {
+			enable_color: false,
+		},
+		disable_log_reloading: false,
 	};
 
 	Ok(config)
@@ -115,36 +144,25 @@ struct RpcMessage {
 }
 
 /// Create a Client object that connects to a service.
-pub fn start_client(mut service: impl AbstractService) -> Client {
-	// Spawn informant
-	wasm_bindgen_futures::spawn_local(
-		sc_informant::build(&service, sc_informant::OutputFormat::Plain).map(drop)
-	);
-
+pub fn start_client(mut task_manager: TaskManager, rpc_handlers: RpcHandlers) -> Client {
 	// We dispatch a background task responsible for processing the service.
 	//
 	// The main action performed by the code below consists in polling the service with
 	// `service.poll()`.
 	// The rest consists in handling RPC requests.
-	let (rpc_send_tx, mut rpc_send_rx) = mpsc::unbounded::<RpcMessage>();
-	wasm_bindgen_futures::spawn_local(poll_fn(move |cx| {
-		loop {
-			match Pin::new(&mut rpc_send_rx).poll_next(cx) {
-				Poll::Ready(Some(message)) => {
-					let fut = service
-						.rpc_query(&message.session, &message.rpc_json)
-						.boxed();
-					let _ = message.send_back.send(fut);
-				},
-				Poll::Pending => break,
-				Poll::Ready(None) => return Poll::Ready(()),
-			}
-		}
-
-		Pin::new(&mut service)
-			.poll(cx)
-			.map(drop)
-	}));
+	let (rpc_send_tx, rpc_send_rx) = mpsc::unbounded::<RpcMessage>();
+	wasm_bindgen_futures::spawn_local(
+		select(
+			rpc_send_rx.for_each(move |message| {
+				let fut = rpc_handlers.rpc_query(&message.session, &message.rpc_json);
+				let _ = message.send_back.send(fut);
+				ready(())
+			}),
+			Box::pin(async move {
+				let _ = task_manager.future().await;
+			}),
+		).map(drop)
+	);
 
 	Client {
 		rpc_send_tx,
