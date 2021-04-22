@@ -167,7 +167,7 @@ impl<PoolApi, Block> BasicPool<PoolApi, Block>
 		let (revalidation_queue, background_task, notifier) =
 			revalidation::RevalidationQueue::new_test(pool_api.clone(), pool.clone());
 		(
-			BasicPool {
+			Self {
 				api: pool_api,
 				pool,
 				revalidation_queue: Arc::new(revalidation_queue),
@@ -203,7 +203,7 @@ impl<PoolApi, Block> BasicPool<PoolApi, Block>
 			spawner.spawn("txpool-background", background_task);
 		}
 
-		BasicPool {
+		Self {
 			api: pool_api,
 			pool,
 			revalidation_queue: Arc::new(revalidation_queue),
@@ -360,7 +360,6 @@ where
 		+ sp_runtime::traits::BlockIdTo<Block>,
 	Client: sc_client_api::ExecutorProvider<Block> + Send + Sync + 'static,
 	Client::Api: sp_transaction_pool::runtime_api::TaggedTransactionQueue<Block>,
-	sp_api::ApiErrorFor<Client, Block>: Send + std::fmt::Display,
 {
 	/// Create new basic transaction pool for a full node with the provided api.
 	pub fn new_full(
@@ -391,7 +390,6 @@ where
 		+ sp_runtime::traits::BlockIdTo<Block>,
 	Client: Send + Sync + 'static,
 	Client::Api: sp_transaction_pool::runtime_api::TaggedTransactionQueue<Block>,
-	sp_api::ApiErrorFor<Client, Block>: Send + std::fmt::Display,
 {
 	type Block = Block;
 	type Hash = sc_transaction_graph::ExtrinsicHash<FullChainApi<Client, Block>>;

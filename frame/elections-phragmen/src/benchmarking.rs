@@ -22,7 +22,7 @@
 use super::*;
 
 use frame_system::RawOrigin;
-use frame_benchmarking::{benchmarks, account};
+use frame_benchmarking::{benchmarks, account, whitelist, impl_benchmark_test_suite};
 use frame_support::traits::OnInitialize;
 
 use crate::Module as Elections;
@@ -32,14 +32,6 @@ const MAX_VOTERS: u32 = 500;
 const MAX_CANDIDATES: u32 = 200;
 
 type Lookup<T> = <<T as frame_system::Config>::Lookup as StaticLookup>::Source;
-
-macro_rules! whitelist {
-	($acc:ident) => {
-		frame_benchmarking::benchmarking::add_to_whitelist(
-			frame_system::Account::<T>::hashed_key_for(&$acc).into()
-		);
-	};
-}
 
 /// grab new account with infinite balance.
 fn endowed_account<T: Config>(name: &'static str, index: u32) -> T::AccountId {
@@ -536,84 +528,9 @@ benchmarks! {
 	}
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-	use crate::tests::{ExtBuilder, Test};
-	use frame_support::assert_ok;
-
-	#[test]
-	fn test_benchmarks_elections_phragmen() {
-		ExtBuilder::default()
-			.desired_members(13)
-			.desired_runners_up(7)
-			.build_and_execute(|| {
-				assert_ok!(test_benchmark_vote_equal::<Test>());
-			});
-
-		ExtBuilder::default()
-			.desired_members(13)
-			.desired_runners_up(7)
-			.build_and_execute(|| {
-				assert_ok!(test_benchmark_vote_more::<Test>());
-			});
-
-		ExtBuilder::default()
-			.desired_members(13)
-			.desired_runners_up(7)
-			.build_and_execute(|| {
-				assert_ok!(test_benchmark_vote_less::<Test>());
-			});
-
-		ExtBuilder::default()
-			.desired_members(13)
-			.desired_runners_up(7)
-			.build_and_execute(|| {
-				assert_ok!(test_benchmark_remove_voter::<Test>());
-			});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_submit_candidacy::<Test>());
-		});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_renounce_candidacy_candidate::<Test>());
-		});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_renounce_candidacy_runners_up::<Test>());
-		});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_renounce_candidacy_members::<Test>());
-		});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_remove_member_without_replacement::<Test>());
-		});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_remove_member_with_replacement::<Test>());
-		});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_clean_defunct_voters::<Test>());
-		});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_election_phragmen::<Test>());
-		});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_election_phragmen::<Test>());
-		});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_election_phragmen_c_e::<Test>());
-		});
-
-		ExtBuilder::default().desired_members(13).desired_runners_up(7).build_and_execute(|| {
-			assert_ok!(test_benchmark_election_phragmen_v::<Test>());
-		});
-	}
-}
+impl_benchmark_test_suite!(
+	Elections,
+	crate::tests::ExtBuilder::default().desired_members(13).desired_runners_up(7),
+	crate::tests::Test,
+	exec_name = build_and_execute,
+);

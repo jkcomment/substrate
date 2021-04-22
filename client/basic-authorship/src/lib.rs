@@ -22,7 +22,7 @@
 //!
 //! ```
 //! # use sc_basic_authorship::ProposerFactory;
-//! # use sp_consensus::{Environment, Proposer, RecordProof};
+//! # use sp_consensus::{Environment, Proposer};
 //! # use sp_runtime::generic::BlockId;
 //! # use std::{sync::Arc, time::Duration};
 //! # use substrate_test_runtime_client::{
@@ -45,6 +45,7 @@
 //!		client.clone(),
 //!		txpool.clone(),
 //!		None,
+//!		None,
 //!	);
 //!
 //! // From this factory, we create a `Proposer`.
@@ -61,7 +62,7 @@
 //! 	Default::default(),
 //! 	Default::default(),
 //! 	Duration::from_secs(2),
-//! 	RecordProof::Yes,
+//! 	None,
 //! );
 //!
 //! // We wait until the proposition is performed.
@@ -72,4 +73,4 @@
 
 mod basic_authorship;
 
-pub use crate::basic_authorship::{ProposerFactory, Proposer, DEFAULT_MAX_BLOCK_SIZE};
+pub use crate::basic_authorship::{ProposerFactory, Proposer, DEFAULT_BLOCK_SIZE_LIMIT};
