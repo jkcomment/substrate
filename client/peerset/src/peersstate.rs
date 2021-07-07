@@ -97,8 +97,8 @@ struct Node {
 	/// are indices into this `Vec`.
 	sets: Vec<MembershipState>,
 
-	/// Reputation value of the node, between `i32::min_value` (we hate that node) and
-	/// `i32::max_value` (we love that node).
+	/// Reputation value of the node, between `i32::MIN` (we hate that node) and
+	/// `i32::MAX` (we love that node).
 	reputation: i32,
 }
 
@@ -272,15 +272,11 @@ impl PeersState {
 			})
 			.map(|(peer_id, _)| peer_id.clone());
 
-		if let Some(peer_id) = outcome {
-			Some(NotConnectedPeer {
+		outcome.map(move |peer_id| NotConnectedPeer {
 				state: self,
 				set,
 				peer_id: Cow::Owned(peer_id),
 			})
-		} else {
-			None
-		}
 	}
 
 	/// Returns `true` if there is a free outgoing slot available related to this set.

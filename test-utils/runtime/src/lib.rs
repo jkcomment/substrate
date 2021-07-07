@@ -92,6 +92,7 @@ pub fn wasm_binary_logging_disabled_unwrap() -> &'static [u8] {
 }
 
 /// Test runtime version.
+#[sp_version::runtime_version]
 pub const VERSION: RuntimeVersion = RuntimeVersion {
 	spec_name: create_runtime_str!("test"),
 	impl_name: create_runtime_str!("parity-test"),
@@ -342,9 +343,6 @@ cfg_if! {
 				fn get_block_number() -> u64;
 				/// Takes and returns the initialized block number.
 				fn take_block_number() -> Option<u64>;
-				/// Returns if no block was initialized.
-				#[skip_initialize_block]
-				fn without_initialize_block() -> bool;
 				/// Test that `ed25519` crypto works in the runtime.
 				///
 				/// Returns the signature generated for the message `ed25519` and the public key.
@@ -395,9 +393,6 @@ cfg_if! {
 				fn get_block_number() -> u64;
 				/// Takes and returns the initialized block number.
 				fn take_block_number() -> Option<u64>;
-				/// Returns if no block was initialized.
-				#[skip_initialize_block]
-				fn without_initialize_block() -> bool;
 				/// Test that `ed25519` crypto works in the runtime.
 				///
 				/// Returns the signature generated for the message `ed25519` and the public key.
@@ -634,6 +629,7 @@ cfg_if! {
 				fn validate_transaction(
 					_source: TransactionSource,
 					utx: <Block as BlockT>::Extrinsic,
+					_: <Block as BlockT>::Hash,
 				) -> TransactionValidity {
 					if let Extrinsic::IncludeData(data) = utx {
 						return Ok(ValidTransaction {
@@ -664,10 +660,6 @@ cfg_if! {
 
 				fn check_inherents(_block: Block, _data: InherentData) -> CheckInherentsResult {
 					CheckInherentsResult::new()
-				}
-
-				fn random_seed() -> <Block as BlockT>::Hash {
-					unimplemented!()
 				}
 			}
 
@@ -721,10 +713,6 @@ cfg_if! {
 
 				fn get_block_number() -> u64 {
 					system::get_block_number().expect("Block number is initialized")
-				}
-
-				fn without_initialize_block() -> bool {
-					system::get_block_number().is_none()
 				}
 
 				fn take_block_number() -> Option<u64> {
@@ -891,6 +879,7 @@ cfg_if! {
 				fn validate_transaction(
 					_source: TransactionSource,
 					utx: <Block as BlockT>::Extrinsic,
+					_: <Block as BlockT>::Hash,
 				) -> TransactionValidity {
 					if let Extrinsic::IncludeData(data) = utx {
 						return Ok(ValidTransaction{
@@ -921,10 +910,6 @@ cfg_if! {
 
 				fn check_inherents(_block: Block, _data: InherentData) -> CheckInherentsResult {
 					CheckInherentsResult::new()
-				}
-
-				fn random_seed() -> <Block as BlockT>::Hash {
-					unimplemented!()
 				}
 			}
 
@@ -984,10 +969,6 @@ cfg_if! {
 					system::get_block_number().expect("Block number is initialized")
 				}
 
-				fn without_initialize_block() -> bool {
-					system::get_block_number().is_none()
-				}
-
 				fn take_block_number() -> Option<u64> {
 					system::take_block_number()
 				}
@@ -1019,7 +1000,7 @@ cfg_if! {
 				}
 
 				fn do_trace_log() {
-					log::error!("Hey I'm runtime: {}", log::STATIC_MAX_LEVEL);
+					log::trace!("Hey I'm runtime: {}", log::STATIC_MAX_LEVEL);
 				}
 			}
 

@@ -49,6 +49,8 @@ pub mod meta_keys {
 	pub const BEST_BLOCK: &[u8; 4] = b"best";
 	/// Last finalized block key.
 	pub const FINALIZED_BLOCK: &[u8; 5] = b"final";
+	/// Last finalized state key.
+	pub const FINALIZED_STATE: &[u8; 6] = b"fstate";
 	/// Meta information prefix for list-based caches.
 	pub const CACHE_META_PREFIX: &[u8; 5] = b"cache";
 	/// Meta information for changes tries key.
@@ -74,6 +76,8 @@ pub struct Meta<N, H> {
 	pub finalized_number: N,
 	/// Hash of the genesis block.
 	pub genesis_hash: H,
+	/// Finalized state, if any
+	pub finalized_state: Option<(H, N)>,
 }
 
 /// A block lookup key: used for canonical lookup from block number to hash
@@ -391,14 +395,13 @@ pub fn read_meta<Block>(db: &dyn Database<DbHash>, col_header: u32) -> Result<
 			finalized_hash: Default::default(),
 			finalized_number: Zero::zero(),
 			genesis_hash: Default::default(),
+			finalized_state: None,
 		}),
 	};
 
 	let load_meta_block = |desc, key| -> Result<_, sp_blockchain::Error> {
-		if let Some(Some(header)) = match db.get(COLUMN_META, key) {
-				Some(id) => db.get(col_header, &id).map(|b| Block::Header::decode(&mut &b[..]).ok()),
-				None => None,
-			}
+		if let Some(Some(header)) = db.get(COLUMN_META, key)
+			.and_then(|id| db.get(col_header, &id).map(|b| Block::Header::decode(&mut &b[..]).ok()))
 		{
 			let hash = header.hash();
 			debug!(
@@ -410,12 +413,18 @@ pub fn read_meta<Block>(db: &dyn Database<DbHash>, col_header: u32) -> Result<
 			);
 			Ok((hash, *header.number()))
 		} else {
-			Ok((genesis_hash.clone(), Zero::zero()))
+			Ok((Default::default(), Zero::zero()))
 		}
 	};
 
 	let (best_hash, best_number) = load_meta_block("best", meta_keys::BEST_BLOCK)?;
 	let (finalized_hash, finalized_number) = load_meta_block("final", meta_keys::FINALIZED_BLOCK)?;
+	let (finalized_state_hash, finalized_state_number) = load_meta_block("final_state", meta_keys::FINALIZED_STATE)?;
+	let finalized_state = if finalized_state_hash != Default::default() {
+		Some((finalized_state_hash, finalized_state_number))
+	} else {
+		None
+	};
 
 	Ok(Meta {
 		best_hash,
@@ -423,6 +432,7 @@ pub fn read_meta<Block>(db: &dyn Database<DbHash>, col_header: u32) -> Result<
 		finalized_hash,
 		finalized_number,
 		genesis_hash,
+		finalized_state,
 	})
 }
 
